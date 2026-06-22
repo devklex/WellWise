@@ -33,6 +33,7 @@ Item max T2 +36-40% | T1 needs ilvl 82 +41-45%
 - Uses actual Well choice rows, not unrelated tooltip or chat text.
 - Uses the item shown in the Well window for class and item level.
 - Handles flat, percent, damage-range, and hybrid modifiers.
+- Handles regular jewel choices, jewel desecrated choices, and Heart of the Well jewel choices.
 - Shows whether a matched choice is a prefix or suffix.
 - Shows exact overlapping tier boundaries, for example `T2/T3  100% (87-100% / 100-119%)`.
 - Handles item-level locked top tiers.
@@ -65,6 +66,7 @@ Then reload/compile source plugins in ExileCore2.
 - Some modifier families have overlapping numeric ranges. Exact overlaps are shown with multiple tiers, while non-exact fallback matches still choose the closest/best tier.
 - Hybrid stats need per-component formatting. A flat component should stay flat, for example `+17-20`, not `+17-20%`.
 - Added-damage rolls use multiple numbers and can overlap between adjacent tiers; exact boundaries should be checked with screenshots if something looks surprising.
+- Jewel options use a separate raw data domain from normal equipment, so screenshots and debug dumps are useful if a jewel still shows `Tier unknown`.
 - `Tier unknown` is safer than a fake tier. It usually means missing item context, unsupported option text, or a data coverage gap.
 - If ExileCore2 hot reload shows old `Tier unknown` labels after an update, restart ExileCore2 so the plugin assembly and copied data reload cleanly.
 - The data file may need regeneration after large PoE2 balance patches.

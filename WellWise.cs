@@ -41,7 +41,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     [
         "Body Armour", "Helmet", "Gloves", "Boots", "Shield", "Buckler", "Quiver", "Focus", "Belt", "Ring", "Amulet",
         "Two Hand Mace", "One Hand Mace", "Two Hand Axe", "One Hand Axe", "Two Hand Sword", "One Hand Sword",
-        "Quarterstaff", "Warstaff", "Crossbow", "Bow", "Spear", "Flail", "Sceptre", "Wand", "Staff", "Dagger", "Claw", "Talisman"
+        "Quarterstaff", "Warstaff", "Crossbow", "Bow", "Spear", "Flail", "Sceptre", "Wand", "Staff", "Dagger", "Claw", "Talisman", "Jewel"
     ];
 
     public override bool Initialise()
@@ -1181,6 +1181,8 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             return "Claw";
         if (ContainsAnyText(normalized, ["Talisman"]))
             return "Talisman";
+        if (ContainsAnyText(normalized, ["Ruby", "Emerald", "Sapphire", "Diamond", "Time-Lost", "Jewel"]))
+            return "Jewel";
 
         return "";
     }
