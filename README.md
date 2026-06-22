@@ -5,6 +5,7 @@ WellWise is an ExileCore2 plugin for Path of Exile 2's Well of Souls. It reads t
 ## What It Shows
 
 - Current roll tier for each visible Well choice.
+- Prefix or suffix side for matched choices.
 - Current tier range, including multi-value and hybrid stats.
 - Best tier/range available for the current item class and item level.
 - Higher item-level T1 requirement when the current item cannot roll the absolute top tier.
@@ -14,15 +15,15 @@ WellWise is an ExileCore2 plugin for Path of Exile 2's Well of Souls. It reads t
 Example labels:
 
 ```text
-T8  +19 (15-24)
-T1  11% (10-15%)
-T4  24% / +17 (21-26% / 17-20)
+Prefix  T8  +19 (15-24)
+Suffix  T1  11% (10-15%)
+Prefix  T4  24% / +17 (21-26% / 17-20)
 Item max T1 39-42% / +33-39
 ```
 
 ```text
-T2/T3  100% (87-100% / 100-119%)
-T3  +31 (31-35)
+Prefix  T2/T3  100% (87-100% / 100-119%)
+Suffix  T3  +31 (31-35)
 Item max T2 +36-40% | T1 needs ilvl 82 +41-45%
 ```
 
@@ -32,6 +33,7 @@ Item max T2 +36-40% | T1 needs ilvl 82 +41-45%
 - Uses actual Well choice rows, not unrelated tooltip or chat text.
 - Uses the item shown in the Well window for class and item level.
 - Handles flat, percent, damage-range, and hybrid modifiers.
+- Shows whether a matched choice is a prefix or suffix.
 - Shows exact overlapping tier boundaries, for example `T2/T3  100% (87-100% / 100-119%)`.
 - Handles item-level locked top tiers.
 - Clears stale choice overlays after a choice is confirmed or the Well returns to the reveal prompt.

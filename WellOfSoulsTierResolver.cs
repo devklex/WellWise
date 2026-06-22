@@ -97,6 +97,7 @@ public sealed class WellOfSoulsTierResolver
                 Source: _database.Source,
                 RuleId: rule.Id,
                 Label: rule.Label,
+                AffixType: DisplayAffixType(rule),
                 OptionText: text,
                 CurrentValue: value,
                 CurrentTier: null,
@@ -125,6 +126,7 @@ public sealed class WellOfSoulsTierResolver
             Source: _database.Source,
             RuleId: rule.Id,
             Label: rule.Label,
+            AffixType: DisplayAffixType(rule),
             OptionText: text,
             CurrentValue: value,
             CurrentTier: currentTier,
@@ -233,6 +235,33 @@ public sealed class WellOfSoulsTierResolver
     private static bool HasItemContext(ItemSnapshot? item)
         => item != null &&
            !string.IsNullOrWhiteSpace(item.ClassName);
+
+    private static string DisplayAffixType(WellTierRule rule)
+    {
+        string normalized = NormalizeAffixType(rule.Generation);
+        if (!string.IsNullOrWhiteSpace(normalized))
+            return normalized;
+
+        normalized = NormalizeAffixType(rule.Id);
+        if (!string.IsNullOrWhiteSpace(normalized))
+            return normalized;
+
+        return string.Empty;
+    }
+
+    private static string NormalizeAffixType(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        if (value.Contains("prefix", StringComparison.OrdinalIgnoreCase))
+            return "Prefix";
+
+        if (value.Contains("suffix", StringComparison.OrdinalIgnoreCase))
+            return "Suffix";
+
+        return string.Empty;
+    }
 
     private static double RuleValueDistance(WellTierRule rule, string text, int itemLevel)
     {
@@ -614,6 +643,7 @@ public sealed record WellOfSoulsTierResult(
     string Source,
     string RuleId,
     string Label,
+    string AffixType,
     string OptionText,
     double? CurrentValue,
     WellTierRange? CurrentTier,
@@ -630,6 +660,7 @@ public sealed record WellOfSoulsTierResult(
             Source: "unknown",
             RuleId: "",
             Label: "",
+            AffixType: "",
             OptionText: optionText,
             CurrentValue: value,
             CurrentTier: null,
@@ -654,6 +685,7 @@ public sealed class WellTierRule
     public string Label { get; set; } = string.Empty;
     public List<string> ItemClassContains { get; set; } = [];
     public List<string> TextContainsAll { get; set; } = [];
+    public string Generation { get; set; } = string.Empty;
     public string Prefix { get; set; } = string.Empty;
     public string Suffix { get; set; } = string.Empty;
     public bool DesecratedOnly { get; set; }

@@ -165,7 +165,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         var currentTiers = GetCurrentTierMatches(result);
         if (currentTiers.Count > 0)
         {
-            var segments = BuildCurrentTierSegments(currentTiers);
+            var segments = BuildCurrentTierSegments(result, currentTiers);
             segments.Add(Segment(FormatCurrentRollWithRange(result, currentTiers), Color.White));
             lines.Add(Line(segments.ToArray()));
         }
@@ -268,9 +268,13 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         return result.CurrentTier == null ? [] : [result.CurrentTier];
     }
 
-    private static List<TextSegment> BuildCurrentTierSegments(IReadOnlyList<WellTierRange> tiers)
+    private static List<TextSegment> BuildCurrentTierSegments(WellOfSoulsTierResult result, IReadOnlyList<WellTierRange> tiers)
     {
         var segments = new List<TextSegment>();
+        string affixType = FormatAffixType(result.AffixType);
+        if (!string.IsNullOrWhiteSpace(affixType))
+            segments.Add(Segment($"{affixType}  ", MutedTextColor()));
+
         for (int i = 0; i < tiers.Count; i++)
         {
             if (i > 0)
@@ -281,6 +285,17 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
         segments.Add(Segment("  ", MutedTextColor()));
         return segments;
+    }
+
+    private static string FormatAffixType(string affixType)
+    {
+        if (affixType.Equals("prefix", StringComparison.OrdinalIgnoreCase))
+            return "Prefix";
+
+        if (affixType.Equals("suffix", StringComparison.OrdinalIgnoreCase))
+            return "Suffix";
+
+        return string.Empty;
     }
 
     private static string FormatTierRangeOnly(WellTierRange tier)
@@ -1066,7 +1081,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
     private static IEnumerable<string> SplitVisibleTextLines(string value)
     {
-        foreach (string part in value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        foreach (string part in value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
         {
             string normalized = NormalizeWhitespace(part);
             if (!string.IsNullOrWhiteSpace(normalized))
