@@ -22,7 +22,8 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private sealed record ElementSearchHit(string RootName, string Path, Element Element, Element? Parent);
     private sealed record WellOption(int Index, string Path, Element Element, Element TextElement, string Text, string RawText, RectangleF Rect);
     private sealed record WellDrawInfo(WellOption Option, WellOfSoulsTierResult TierResult);
-    private sealed record WellState(List<WellOption> Options, ItemSnapshot? ItemContext, bool AwaitingRevealPrompt = false);
+    private sealed record WellState(List<WellOption> Options, ItemSnapshot? ItemContext, bool AwaitingRevealPrompt = false, bool WindowVisible = false);
+    private sealed record AreaInfo(string InstanceName, string AreaName, string AreaId, string RawName);
 
     private static readonly Regex WellRollValueRegex = new(@"(?<prefix>[+-]?)\s*(?<value>\d+(?:\.\d+)?)(?<suffix>%?)", RegexOptions.Compiled);
 
@@ -34,9 +35,17 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private Element? _cachedWellRoot;
     private DateTime _nextScanAt = DateTime.MinValue;
     private DateTime _nextBroadScanAt = DateTime.MinValue;
+    private int _consecutivePartialReads;
 
     private static readonly TimeSpan ScanInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan BroadScanInterval = TimeSpan.FromMilliseconds(4000);
+    private static readonly TimeSpan IdleScanInterval = TimeSpan.FromMilliseconds(2000);
+    private static readonly TimeSpan IdleBroadScanInterval = TimeSpan.FromSeconds(15);
+    private static readonly HashSet<string> WellAreaRawNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Abyss_Hub",
+        "Abyss_Pinnacle"
+    };
     private static readonly string[] WellKnownItemClasses =
     [
         "Body Armour", "Helmet", "Gloves", "Boots", "Shield", "Buckler", "Quiver", "Focus", "Belt", "Ring", "Amulet",
@@ -57,6 +66,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _drawInfos = [];
         _itemContext = null;
         _cachedWellRoot = null;
+        _consecutivePartialReads = 0;
         _nextScanAt = DateTime.MinValue;
         _nextBroadScanAt = DateTime.MinValue;
     }
@@ -67,10 +77,42 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             return;
 
         var now = DateTime.UtcNow;
+        var areaInfo = GetCurrentAreaInfo();
+        bool inWellArea = IsWellOfSoulsArea(areaInfo);
+        if (!inWellArea)
+        {
+            ClearWellState();
+            Settings.LastStatus.Value = _resolver.LoadStatus;
+            Settings.LastContext.Value = "No Well item context";
+            Settings.LastOptions.Value = "Outside The Well of Souls area";
+            _nextScanAt = now + IdleScanInterval;
+            _nextBroadScanAt = now + IdleBroadScanInterval;
+            DrawAreaDebugOverlay(areaInfo, false);
+            return;
+        }
+
         if (now >= _nextScanAt)
         {
             bool allowBroadScan = now >= _nextBroadScanAt;
             var state = ReadWellState(allowBroadScan);
+            if (!state.WindowVisible)
+            {
+                ClearWellState();
+                Settings.LastStatus.Value = _resolver.LoadStatus;
+                Settings.LastContext.Value = "No Well item context";
+                Settings.LastOptions.Value = "Well of Souls not visible";
+                _nextScanAt = now + IdleScanInterval;
+                if (allowBroadScan)
+                    _nextBroadScanAt = now + IdleBroadScanInterval;
+                return;
+            }
+
+            if (HandlePartialOptionRead(state, now))
+            {
+                DrawWellOptions(_drawInfos);
+                return;
+            }
+
             if (state.AwaitingRevealPrompt)
             {
                 _options = [];
@@ -91,12 +133,115 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             Settings.LastStatus.Value = _resolver.LoadStatus;
             Settings.LastContext.Value = FormatContext(_itemContext);
             Settings.LastOptions.Value = _options.Count == 0 ? "No Well options found" : $"{_options.Count} Well options";
+            _consecutivePartialReads = 0;
             _nextScanAt = now + ScanInterval;
             if (allowBroadScan)
                 _nextBroadScanAt = now + BroadScanInterval;
         }
 
         DrawWellOptions(_drawInfos);
+        DrawAreaDebugOverlay(areaInfo, true);
+    }
+
+    private void ClearWellState()
+    {
+        _options = [];
+        _drawInfos = [];
+        _itemContext = null;
+        _cachedWellRoot = null;
+        _consecutivePartialReads = 0;
+    }
+
+    private AreaInfo GetCurrentAreaInfo()
+    {
+        try
+        {
+            var area = GameController.Area?.CurrentArea;
+            var worldArea = area?.Area;
+            return new AreaInfo(
+                area?.Name ?? string.Empty,
+                ReadObjectStringProperty(worldArea, "Name"),
+                ReadObjectStringProperty(worldArea, "Id"),
+                ReadObjectStringProperty(worldArea, "RawName"));
+        }
+        catch
+        {
+            return new AreaInfo(string.Empty, string.Empty, string.Empty, string.Empty);
+        }
+    }
+
+    private static bool IsWellOfSoulsArea(AreaInfo area)
+    {
+        return WellAreaRawNames.Contains(area.AreaId) ||
+               WellAreaRawNames.Contains(area.RawName) ||
+               string.Equals(area.InstanceName, "The Well of Souls", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(area.AreaName, "The Well of Souls", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void DrawAreaDebugOverlay(AreaInfo area, bool inWellArea)
+    {
+        if (!Settings.ShowAreaDebugOverlay.Value)
+            return;
+
+        string here = FirstNonEmpty(area.InstanceName, area.AreaName, area.AreaId, area.RawName, "unknown area");
+        string id = FirstNonEmpty(area.AreaId, area.RawName, "unknown id");
+        string line1 = inWellArea
+            ? "WellWise: You're in The Well of Souls"
+            : $"WellWise: You're not in The Well of Souls, you're here: {here}";
+        string line2 = $"Area id: {id}";
+
+        float lineHeight = ImGui.GetTextLineHeight();
+        float width = Math.Clamp(Math.Max(ImGui.CalcTextSize(line1).X, ImGui.CalcTextSize(line2).X) + 18f, 260f, 900f);
+        float height = lineHeight * 2f + 12f;
+        var box = ClampToDisplay(new RectangleF(12f, 96f, width, height));
+        var titleColor = inWellArea ? Color.LightGreen : Color.Orange;
+
+        Graphics.DrawBox(box, Color.FromArgb(232, 4, 4, 4));
+        Graphics.DrawFrame(box, Color.FromArgb(210, 195, 176, 95), 1);
+        Graphics.DrawText(line1, new Vector2(box.X + 9f, box.Y + 6f), titleColor);
+        Graphics.DrawText(line2, new Vector2(box.X + 9f, box.Y + 6f + lineHeight), Color.LightGray);
+    }
+
+    private static string ReadObjectStringProperty(object? obj, string propertyName)
+    {
+        if (obj == null)
+            return string.Empty;
+
+        try
+        {
+            var prop = obj.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (prop == null || prop.GetIndexParameters().Length != 0)
+                return string.Empty;
+
+            return prop.GetValue(obj)?.ToString() ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private bool HandlePartialOptionRead(WellState state, DateTime now)
+    {
+        if (state.Options.Count is 0 or >= 3)
+            return false;
+
+        _consecutivePartialReads++;
+        bool sameItem = SameWellItemContext(state.ItemContext, _itemContext);
+        if (!sameItem || _options.Count < 3)
+        {
+            _options = [];
+            _drawInfos = [];
+            _itemContext = state.ItemContext;
+        }
+
+        _cachedWellRoot = null;
+        _nextScanAt = now;
+        _nextBroadScanAt = now;
+        Settings.LastStatus.Value = _resolver.LoadStatus;
+        Settings.LastContext.Value = FormatContext(_itemContext);
+        Settings.LastOptions.Value = $"Partial Well options ({state.Options.Count}/3); retrying {_consecutivePartialReads}";
+        return true;
     }
 
     private void LoadData()
@@ -107,6 +252,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _drawInfos = [];
         _itemContext = null;
         _cachedWellRoot = null;
+        _consecutivePartialReads = 0;
         _nextScanAt = DateTime.MinValue;
         _nextBroadScanAt = DateTime.MinValue;
     }
@@ -355,13 +501,13 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         try
         {
             var cachedState = TryReadWellStateFromRoot(_cachedWellRoot);
-            if (cachedState != null && (cachedState.Options.Count > 0 || !allowBroadSearch))
+            if (cachedState != null && (HasCompleteOptions(cachedState) || !allowBroadSearch))
                 return AttachAvailableWellContext(cachedState);
 
             _cachedWellRoot = null;
 
             var directState = TryReadLikelyWellState(out var directRoot);
-            if (directState != null && (directState.Options.Count > 0 || !allowBroadSearch))
+            if (directState != null && (HasCompleteOptions(directState) || !allowBroadSearch))
             {
                 _cachedWellRoot = directRoot;
                 return AttachAvailableWellContext(directState);
@@ -372,6 +518,8 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
             var hits = FindWellElements(12, 80);
             var candidateRoots = FindCandidateRoots(hits).Take(12).ToList();
+            WellState? partialVisibleState = null;
+            Element? partialVisibleRoot = null;
             WellState? emptyVisibleState = null;
             Element? emptyVisibleRoot = null;
 
@@ -381,14 +529,27 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
                 if (state == null)
                     continue;
 
-                if (state.Options.Count > 0)
+                if (HasCompleteOptions(state))
                 {
                     _cachedWellRoot = root;
                     return AttachAvailableWellContext(state);
                 }
 
+                if (HasPartialOptions(state))
+                {
+                    partialVisibleState ??= state;
+                    partialVisibleRoot ??= root;
+                    continue;
+                }
+
                 emptyVisibleState ??= state;
                 emptyVisibleRoot ??= root;
+            }
+
+            if (partialVisibleState != null)
+            {
+                _cachedWellRoot = partialVisibleRoot;
+                return AttachAvailableWellContext(partialVisibleState);
             }
 
             if (emptyVisibleState != null)
@@ -411,18 +572,26 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         return new WellState([], null);
     }
 
+    private static bool HasCompleteOptions(WellState state)
+        => state.Options.Count >= 3;
+
+    private static bool HasPartialOptions(WellState state)
+        => state.Options.Count is > 0 and < 3;
+
     private WellState AttachAvailableWellContext(WellState state)
     {
         if (state.ItemContext != null || state.Options.Count == 0)
             return state;
 
         var context = BuildWellItemContext();
-        return context == null ? state : new WellState(state.Options, context, state.AwaitingRevealPrompt);
+        return context == null ? state : new WellState(state.Options, context, state.AwaitingRevealPrompt, state.WindowVisible);
     }
 
     private WellState? TryReadLikelyWellState(out Element? matchedRoot)
     {
         matchedRoot = null;
+        WellState? partialVisibleState = null;
+        Element? partialVisibleRoot = null;
         WellState? emptyVisibleState = null;
         Element? emptyVisibleRoot = null;
 
@@ -432,14 +601,27 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             if (state == null)
                 continue;
 
-            if (state.Options.Count >= 2)
+            if (HasCompleteOptions(state))
             {
                 matchedRoot = root;
                 return state;
             }
 
+            if (HasPartialOptions(state))
+            {
+                partialVisibleState ??= state;
+                partialVisibleRoot ??= root;
+                continue;
+            }
+
             emptyVisibleState ??= state;
             emptyVisibleRoot ??= root;
+        }
+
+        if (partialVisibleState != null)
+        {
+            matchedRoot = partialVisibleRoot;
+            return partialVisibleState;
         }
 
         if (emptyVisibleState != null)
@@ -484,7 +666,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         bool awaitingRevealPrompt = options.Count == 0 &&
             ElementSubtreeContainsText(root, ["Place an item with an Unrevealed Desecrated Modifier"], 8, 240);
 
-        return new WellState(options, context, awaitingRevealPrompt);
+        return new WellState(options, context, awaitingRevealPrompt, true);
     }
 
     private static ItemSnapshot? BuildWellItemContext(Element root)
