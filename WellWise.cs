@@ -2,9 +2,12 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Reflection;
+using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using ExileCore2;
 using ExileCore2.PoEMemory;
@@ -35,12 +38,18 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private Element? _cachedWellRoot;
     private DateTime _nextScanAt = DateTime.MinValue;
     private DateTime _nextBroadScanAt = DateTime.MinValue;
+    private DateTime _partialCooldownUntil = DateTime.MinValue;
     private int _consecutivePartialReads;
 
     private static readonly TimeSpan ScanInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan BroadScanInterval = TimeSpan.FromMilliseconds(4000);
     private static readonly TimeSpan IdleScanInterval = TimeSpan.FromMilliseconds(2000);
     private static readonly TimeSpan IdleBroadScanInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan PartialRetryInterval = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan PartialBroadRetryInterval = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan PartialCooldownInterval = TimeSpan.FromSeconds(5);
+    private static readonly JsonSerializerOptions DiagnosticJsonOptions = new() { WriteIndented = true };
+    private const int MaxConsecutivePartialReads = 6;
     private static readonly HashSet<string> WellAreaRawNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "Abyss_Hub",
@@ -57,6 +66,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     {
         LoadData();
         Settings.ReloadData.OnPressed += LoadData;
+        Settings.ExportDiagnosticReport.OnPressed += ExportDiagnosticReport;
         return true;
     }
 
@@ -69,6 +79,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _consecutivePartialReads = 0;
         _nextScanAt = DateTime.MinValue;
         _nextBroadScanAt = DateTime.MinValue;
+        _partialCooldownUntil = DateTime.MinValue;
     }
 
     public override void Render()
@@ -134,6 +145,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             Settings.LastContext.Value = FormatContext(_itemContext);
             Settings.LastOptions.Value = _options.Count == 0 ? "No Well options found" : $"{_options.Count} Well options";
             _consecutivePartialReads = 0;
+            _partialCooldownUntil = DateTime.MinValue;
             _nextScanAt = now + ScanInterval;
             if (allowBroadScan)
                 _nextBroadScanAt = now + BroadScanInterval;
@@ -150,6 +162,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _itemContext = null;
         _cachedWellRoot = null;
         _consecutivePartialReads = 0;
+        _partialCooldownUntil = DateTime.MinValue;
     }
 
     private AreaInfo GetCurrentAreaInfo()
@@ -236,11 +249,23 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         }
 
         _cachedWellRoot = null;
-        _nextScanAt = now;
-        _nextBroadScanAt = now;
         Settings.LastStatus.Value = _resolver.LoadStatus;
         Settings.LastContext.Value = FormatContext(_itemContext);
-        Settings.LastOptions.Value = $"Partial Well options ({state.Options.Count}/3); retrying {_consecutivePartialReads}";
+
+        if (_consecutivePartialReads >= MaxConsecutivePartialReads)
+        {
+            _partialCooldownUntil = now + PartialCooldownInterval;
+            _nextScanAt = _partialCooldownUntil;
+            _nextBroadScanAt = _partialCooldownUntil;
+            Settings.LastOptions.Value = $"Partial Well options stuck ({state.Options.Count}/3); cooling down {PartialCooldownInterval.TotalSeconds:0}s";
+            return true;
+        }
+
+        _nextScanAt = now + PartialRetryInterval;
+        if (_nextBroadScanAt <= now)
+            _nextBroadScanAt = now + PartialBroadRetryInterval;
+
+        Settings.LastOptions.Value = $"Partial Well options ({state.Options.Count}/3); retrying {_consecutivePartialReads}/{MaxConsecutivePartialReads}";
         return true;
     }
 
@@ -255,6 +280,236 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _consecutivePartialReads = 0;
         _nextScanAt = DateTime.MinValue;
         _nextBroadScanAt = DateTime.MinValue;
+        _partialCooldownUntil = DateTime.MinValue;
+    }
+
+    private void ExportDiagnosticReport()
+    {
+        try
+        {
+            var now = DateTime.UtcNow;
+            var areaInfo = GetCurrentAreaInfo();
+            var reportDirectory = Path.Combine(DirectoryFullName, "diagnostics");
+            Directory.CreateDirectory(reportDirectory);
+            string reportPath = Path.Combine(reportDirectory, $"wellwise-diagnostic-{now:yyyyMMdd-HHmmss}.txt");
+
+            var report = new StringBuilder();
+            report.AppendLine("WellWise diagnostic report");
+            report.AppendLine($"Generated UTC: {now:O}");
+            report.AppendLine($"Plugin directory: {DirectoryFullName}");
+            report.AppendLine($"Assembly version: {GetType().Assembly.GetName().Version}");
+            report.AppendLine();
+            report.AppendLine("[Settings]");
+            report.AppendLine($"Enable: {Settings.Enable.Value}");
+            report.AppendLine($"ShowOptionText: {Settings.ShowOptionText.Value}");
+            report.AppendLine($"ShowAreaDebugOverlay: {Settings.ShowAreaDebugOverlay.Value}");
+            report.AppendLine($"DebugMode: {Settings.DebugMode.Value}");
+            report.AppendLine();
+            report.AppendLine("[Area]");
+            report.AppendLine($"In Well area: {IsWellOfSoulsArea(areaInfo)}");
+            report.AppendLine($"InstanceName: {areaInfo.InstanceName}");
+            report.AppendLine($"AreaName: {areaInfo.AreaName}");
+            report.AppendLine($"AreaId: {areaInfo.AreaId}");
+            report.AppendLine($"RawName: {areaInfo.RawName}");
+            report.AppendLine();
+            AppendUiRootReport(report);
+            report.AppendLine("[Scan schedule]");
+            report.AppendLine($"Consecutive partial reads: {_consecutivePartialReads}");
+            report.AppendLine($"Next scan: {FormatSchedule(_nextScanAt, now)}");
+            report.AppendLine($"Next broad scan: {FormatSchedule(_nextBroadScanAt, now)}");
+            report.AppendLine($"Partial cooldown until: {FormatSchedule(_partialCooldownUntil, now)}");
+            report.AppendLine($"Cached root: {FormatElement(_cachedWellRoot)}");
+            report.AppendLine();
+            report.AppendLine("[Last status fields]");
+            report.AppendLine($"LastStatus: {Settings.LastStatus.Value}");
+            report.AppendLine($"LastContext: {Settings.LastContext.Value}");
+            report.AppendLine($"LastOptions: {Settings.LastOptions.Value}");
+            report.AppendLine();
+
+            WellState freshState;
+            try
+            {
+                freshState = ReadWellState(allowBroadSearch: true);
+            }
+            catch (Exception ex)
+            {
+                freshState = new WellState([], null);
+                report.AppendLine("[Fresh broad Well read]");
+                report.AppendLine($"Read failed: {ex}");
+                report.AppendLine();
+            }
+
+            var freshItem = freshState.ItemContext ?? _itemContext;
+            AppendWellStateReport(report, "Fresh broad Well read", freshState, freshItem, BuildDrawInfos(freshState.Options, freshItem));
+
+            var cachedState = new WellState(_options, _itemContext, WindowVisible: _options.Count > 0);
+            AppendWellStateReport(report, "Cached overlay state", cachedState, _itemContext, _drawInfos);
+
+            AppendCandidateRootReport(report);
+            AppendRuntimeProbeReport(report, freshState, freshItem);
+
+            File.WriteAllText(reportPath, report.ToString(), Encoding.UTF8);
+            Settings.LastOptions.Value = $"Diagnostic report saved: {reportPath}";
+        }
+        catch (Exception ex)
+        {
+            Settings.LastOptions.Value = $"Diagnostic report failed: {ex.Message}";
+            LogError($"WellWise diagnostic report failed: {ex}");
+        }
+    }
+
+    private void AppendRuntimeProbeReport(StringBuilder report, WellState state, ItemSnapshot? item)
+    {
+        report.AppendLine("[Runtime record probe]");
+        if (state.Options.Count == 0)
+        {
+            report.AppendLine("Skipped: no current Well option text.");
+            report.AppendLine();
+            return;
+        }
+
+        try
+        {
+            var probe = _resolver.BuildRuntimeProbe(GameController, item, state.Options.Select(option => option.Text), item?.ItemLevel ?? 0);
+            report.AppendLine(JsonSerializer.Serialize(probe, DiagnosticJsonOptions));
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"Runtime probe failed: {ex}");
+        }
+
+        report.AppendLine();
+    }
+
+    private void AppendCandidateRootReport(StringBuilder report)
+    {
+        report.AppendLine("[Candidate Well roots]");
+        try
+        {
+            var hits = FindWellElements(12, 80);
+            var roots = FindCandidateRoots(hits).Take(12).ToList();
+            report.AppendLine($"Text hits: {hits.Count}");
+            foreach (var hit in hits.Take(24))
+            {
+                string text = TrimForReport(string.Join(" ", ReadStringishProperties(hit.Element).Values), 240);
+                report.AppendLine($"Hit: {hit.Path} | {FormatElement(hit.Element)} | {text}");
+            }
+
+            report.AppendLine($"Candidate roots: {roots.Count}");
+            for (int i = 0; i < roots.Count; i++)
+            {
+                var root = roots[i];
+                var state = TryReadWellStateFromRoot(root);
+                report.AppendLine($"Root {i + 1}: {FormatElement(root)}");
+                if (state == null)
+                {
+                    report.AppendLine("  State: null");
+                    continue;
+                }
+
+                report.AppendLine($"  State: visible={state.WindowVisible}, awaitingReveal={state.AwaitingRevealPrompt}, options={state.Options.Count}, context={FormatContext(state.ItemContext)}");
+                foreach (var option in state.Options)
+                    report.AppendLine($"  Option {option.Index}: {TrimForReport(option.Text, 180)} | path={option.Path} | rect={FormatRect(option.Rect)} | element={FormatElement(option.TextElement)}");
+            }
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"Candidate root report failed: {ex}");
+        }
+
+        report.AppendLine();
+    }
+
+    private void AppendUiRootReport(StringBuilder report)
+    {
+        report.AppendLine("[UI roots]");
+        foreach (var (name, root) in GetWellSearchRoots())
+            report.AppendLine($"{name}: {FormatElement(root)}");
+
+        report.AppendLine();
+    }
+
+    private static void AppendWellStateReport(StringBuilder report, string title, WellState state, ItemSnapshot? item, IReadOnlyList<WellDrawInfo> drawInfos)
+    {
+        report.AppendLine($"[{title}]");
+        report.AppendLine($"WindowVisible: {state.WindowVisible}");
+        report.AppendLine($"AwaitingRevealPrompt: {state.AwaitingRevealPrompt}");
+        report.AppendLine($"Options: {state.Options.Count}");
+        report.AppendLine($"Item: {FormatContext(item)}");
+        report.AppendLine($"State item: {FormatContext(state.ItemContext)}");
+
+        foreach (var option in state.Options)
+        {
+            report.AppendLine($"Option {option.Index}");
+            report.AppendLine($"  Text: {option.Text}");
+            report.AppendLine($"  RawText: {option.RawText}");
+            report.AppendLine($"  Path: {option.Path}");
+            report.AppendLine($"  Rect: {FormatRect(option.Rect)}");
+            report.AppendLine($"  Element: {FormatElement(option.Element)}");
+            report.AppendLine($"  TextElement: {FormatElement(option.TextElement)}");
+
+            var drawInfo = drawInfos.FirstOrDefault(info =>
+                info.Option.Index == option.Index &&
+                info.Option.Text.Equals(option.Text, StringComparison.OrdinalIgnoreCase));
+            if (drawInfo != null)
+                AppendTierResultReport(report, drawInfo.TierResult);
+        }
+
+        report.AppendLine();
+    }
+
+    private static void AppendTierResultReport(StringBuilder report, WellOfSoulsTierResult result)
+    {
+        report.AppendLine($"  TierKnown: {result.Known}");
+        report.AppendLine($"  AffixType: {result.AffixType}");
+        report.AppendLine($"  Source: {result.Source}");
+        report.AppendLine($"  RuleId: {result.RuleId}");
+        report.AppendLine($"  Label: {result.Label}");
+        report.AppendLine($"  CurrentValue: {result.CurrentValue?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? ""}");
+        report.AppendLine($"  Summary: {result.Summary}");
+        report.AppendLine($"  Detail: {result.Detail}");
+        report.AppendLine($"  CurrentTier: {FormatTierForReport(result.CurrentTier)}");
+        report.AppendLine($"  CurrentTierMatches: {string.Join(", ", result.CurrentTierMatches.Select(FormatTierForReport))}");
+        report.AppendLine($"  BestTier: {FormatTierForReport(result.BestTier)}");
+        report.AppendLine($"  AbsoluteBestTier: {FormatTierForReport(result.AbsoluteBestTier)}");
+    }
+
+    private static string FormatTierForReport(WellTierRange? tier)
+        => tier == null ? "" : WellOfSoulsTierResolver.FormatTier(tier);
+
+    private static string FormatSchedule(DateTime target, DateTime now)
+    {
+        if (target == DateTime.MinValue)
+            return "not scheduled";
+
+        if (target <= now)
+            return "due";
+
+        return $"{(target - now).TotalMilliseconds:0}ms";
+    }
+
+    private static string FormatElement(Element? element)
+    {
+        if (element == null)
+            return "null";
+
+        try
+        {
+            return $"0x{(long)element.Address:X} visible={SafeVisible(element)} rect={FormatRect(element.GetClientRectCache)}";
+        }
+        catch
+        {
+            return $"0x{(long)element.Address:X}";
+        }
+    }
+
+    private static string FormatRect(RectangleF rect)
+        => $"x={rect.X:0.#}, y={rect.Y:0.#}, w={rect.Width:0.#}, h={rect.Height:0.#}";
+
+    private static string TrimForReport(string value, int maxLength)
+    {
+        string normalized = NormalizeWhitespace(value);
+        return normalized.Length <= maxLength ? normalized : normalized[..maxLength] + "...";
     }
 
     private List<WellDrawInfo> BuildDrawInfos(IReadOnlyList<WellOption> options, ItemSnapshot? item)
@@ -632,22 +887,32 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
     private IEnumerable<Element> GetLikelyWellRoots()
     {
-        var controllerMenu = GameController.Game.IngameState.IngameUi.ControllerGeneralMenu;
-        int[][] rootPaths =
+        var result = new List<Element>();
+        var seen = new HashSet<long>();
+        var ingameUi = GameController.Game.IngameState.IngameUi;
+
+        AddRoot(ingameUi.OpenLeftPanel);
+        AddRoot(ingameUi.OpenRightPanel);
+        AddRoot(ingameUi.ControllerGeneralMenu);
+
+        int[][] controllerPaths =
         [
             [17, 2, 1, 14],
             [17, 2, 1, 14, 0],
             [17, 2, 1, 14, 0, 3]
         ];
 
-        var seen = new HashSet<long>();
-        foreach (var path in rootPaths)
-        {
-            var root = FollowChildChain(controllerMenu, path);
-            if (root == null || root.Address == 0 || !seen.Add((long)root.Address))
-                continue;
+        foreach (var path in controllerPaths)
+            AddRoot(FollowChildChain(ingameUi.ControllerGeneralMenu, path));
 
-            yield return root;
+        return result;
+
+        void AddRoot(Element? root)
+        {
+            if (root == null || root.Address == 0 || !SafeVisible(root) || !seen.Add((long)root.Address))
+                return;
+
+            result.Add(root);
         }
     }
 
@@ -940,17 +1205,8 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     {
         var hits = new List<ElementSearchHit>();
         var seenRoots = new HashSet<long>();
-        var ingameUi = GameController.Game.IngameState.IngameUi;
-        var roots = new List<(string Name, Element? Element)>
-        {
-            ("ingameUi", ingameUi),
-            ("ingameUi.Parent", TryGetElementProperty(ingameUi, "Parent")),
-            ("controllerMenu", GameController.Game.IngameState.IngameUi.ControllerGeneralMenu),
-            ("openLeftPanel", GameController.Game.IngameState.IngameUi.OpenLeftPanel),
-            ("openRightPanel", GameController.Game.IngameState.IngameUi.OpenRightPanel)
-        };
 
-        foreach (var (name, root) in roots)
+        foreach (var (name, root) in GetWellSearchRoots())
         {
             if (root == null || root.Address == 0 || !seenRoots.Add((long)root.Address))
                 continue;
@@ -961,6 +1217,16 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         }
 
         return hits;
+    }
+
+    private IEnumerable<(string Name, Element? Element)> GetWellSearchRoots()
+    {
+        var ingameUi = GameController.Game.IngameState.IngameUi;
+        yield return ("openLeftPanel", ingameUi.OpenLeftPanel);
+        yield return ("openRightPanel", ingameUi.OpenRightPanel);
+        yield return ("controllerMenu", ingameUi.ControllerGeneralMenu);
+        yield return ("ingameUi", ingameUi);
+        yield return ("ingameUi.Parent", TryGetElementProperty(ingameUi, "Parent"));
     }
 
     private static void FindWellElements(Element element, Element? parent, string path, int depth, int maxDepth, int maxHits, List<ElementSearchHit> hits)

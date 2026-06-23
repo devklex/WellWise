@@ -10,6 +10,7 @@ public sealed class WellWiseSettings : ISettings
     public ToggleNode ShowAreaDebugOverlay { get; set; } = new(false);
     public ToggleNode DebugMode { get; set; } = new(false);
     public ButtonNode ReloadData { get; set; } = new();
+    public ButtonNode ExportDiagnosticReport { get; set; } = new();
     public TextNode LastStatus { get; set; } = new("");
     public TextNode LastContext { get; set; } = new("");
     public TextNode LastOptions { get; set; } = new("");
