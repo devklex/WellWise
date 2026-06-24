@@ -723,6 +723,9 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             if (i > 0)
                 segments.Add(Segment("/", MutedTextColor()));
 
+            if (tiers[i].Legacy)
+                segments.Add(Segment("Legacy ", MutedTextColor()));
+
             segments.Add(Segment($"T{tiers[i].Tier}", TierColor(tiers[i].Tier)));
         }
 

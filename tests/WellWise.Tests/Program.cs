@@ -12,6 +12,8 @@ var tests = new (string Name, Action Body)[]
     ("belt charm mana-as-armour desecrated mod resolves", BeltManaAsArmour),
     ("jewel skill effect duration resolves", JewelSkillEffectDuration),
     ("jewel cold penetration resolves", JewelColdPenetration),
+    ("staff block chance uses current self-extracted range", StaffBlockChanceUsesCurrentRange),
+    ("staff block chance legacy range remains recognized", StaffBlockChanceLegacyRange),
     ("otherworldly ring mana before life resolves", OtherworldlyRingDamageTakenFromManaBeforeLife),
     ("otherworldly amulet scaled critical chance uses display range", OtherworldlyAmuletFireSpellCriticalChance),
     ("otherworldly belt no-number stat resolves without fake range", OtherworldlyBeltMeleeSplash),
@@ -131,6 +133,25 @@ static void JewelColdPenetration()
     AssertKnown(result);
     AssertEqualIgnoreCase("prefix", result.AffixType, "jewel cold penetration affix type");
     AssertContains(result.Label, "Cold Resistance", "jewel cold penetration label");
+}
+
+static void StaffBlockChanceUsesCurrentRange()
+{
+    var result = CreateResolver().Resolve(Item("Staff", 80), "+24% to Block chance");
+    AssertKnown(result);
+    AssertEqual(1, result.CurrentTier?.Tier, "staff block chance tier");
+    AssertFalse(result.CurrentTier?.Legacy == true, "current staff block chance should not be marked legacy");
+    AssertContains(result.Summary, "+20-25%", "current staff block chance range");
+}
+
+static void StaffBlockChanceLegacyRange()
+{
+    var result = CreateResolver().Resolve(Item("Staff", 80), "+14% to Block chance");
+    AssertKnown(result);
+    AssertEqual(1, result.CurrentTier?.Tier, "legacy staff block chance tier");
+    AssertEqual(true, result.CurrentTier?.Legacy, "legacy staff block chance marker");
+    AssertContains(result.Summary, "Legacy T1 +12-16%", "legacy staff block chance range");
+    AssertContains(result.Summary, "item max T1 +20-25%", "legacy staff block chance current item max");
 }
 
 static void OtherworldlyRingDamageTakenFromManaBeforeLife()

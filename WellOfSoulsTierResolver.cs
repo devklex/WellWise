@@ -86,10 +86,12 @@ public sealed class WellOfSoulsTierResolver
         int itemLevel = item?.ItemLevel > 0 ? item.ItemLevel : Math.Max(0, fallbackItemLevel);
         var allTiers = rule.Tiers
             .OrderBy(tier => tier.Tier)
+            .ThenBy(tier => tier.Legacy ? 1 : 0)
             .ToList();
         var availableTiers = rule.Tiers
             .Where(tier => itemLevel > 0 ? tier.ItemLevel <= itemLevel : true)
             .OrderBy(tier => tier.Tier)
+            .ThenBy(tier => tier.Legacy ? 1 : 0)
             .ToList();
 
         List<WellTierRange> currentTierMatches = values.Count == 0
@@ -403,11 +405,12 @@ public sealed class WellOfSoulsTierResolver
 
     public static string FormatTier(WellTierRange tier, WellTierRule? rule = null)
     {
-        return $"T{tier.Tier} {FormatRange(tier, rule)}";
+        string legacy = tier.Legacy ? "Legacy " : "";
+        return $"{legacy}T{tier.Tier} {FormatRange(tier, rule)}";
     }
 
     private static string FormatTierWithItemLevel(WellTierRange tier, WellTierRule? rule = null)
-        => $"T{tier.Tier}@ilvl{tier.ItemLevel} {FormatRange(tier, rule)}";
+        => $"{(tier.Legacy ? "Legacy " : "")}T{tier.Tier}@ilvl{tier.ItemLevel} {FormatRange(tier, rule)}";
 
     private static string FormatRange(WellTierRange tier, WellTierRule? rule = null)
     {
@@ -685,6 +688,7 @@ public sealed class WellTierRange
     public int ItemLevel { get; set; }
     public double Min { get; set; }
     public double Max { get; set; }
+    public bool Legacy { get; set; }
     public List<WellTierValueRange> Values { get; set; } = [];
 
     public bool Contains(double value)
