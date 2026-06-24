@@ -51,6 +51,38 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private static readonly TimeSpan PartialCooldownInterval = TimeSpan.FromSeconds(5);
     private static readonly JsonSerializerOptions DiagnosticJsonOptions = new() { WriteIndented = true };
     private const int MaxConsecutivePartialReads = 6;
+    private static readonly string[] WellPrimarySearchTerms =
+    {
+        "The Well of Souls",
+        "Desecrated Modifier",
+        "Unrevealed Desecrated Modifier",
+        "Take this item",
+        "Place an item with",
+        "Reveal",
+        "Confirm"
+    };
+    private static readonly string[] WellFallbackSearchTerms =
+    {
+        "The Well of Souls",
+        "Options",
+        "Desecrated Modifier",
+        "Reveal",
+        "Confirm",
+        "Presence",
+        "Critical Hit Chance",
+        "Mana Regeneration",
+        "Life Regeneration",
+        "Life Regen",
+        "Energy Shield",
+        "Recharge Rate",
+        "Strength",
+        "Dexterity",
+        "Intelligence",
+        "Spirit",
+        "Resistance",
+        "Threshold",
+        "Deflection"
+    };
     private static readonly HashSet<string> WellAreaRawNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "Abyss_Hub",
@@ -1244,6 +1276,16 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
     private List<ElementSearchHit> FindWellElements(int maxDepth, int maxHits)
     {
+        var primaryHits = FindWellElements(maxDepth, maxHits, WellPrimarySearchTerms);
+        if (FindCandidateRoots(primaryHits).Count > 0)
+            return primaryHits;
+
+        var fallbackHits = FindWellElements(maxDepth, maxHits, WellFallbackSearchTerms);
+        return MergeSearchHits(primaryHits, fallbackHits, maxHits);
+    }
+
+    private List<ElementSearchHit> FindWellElements(int maxDepth, int maxHits, IReadOnlyList<string> terms)
+    {
         var hits = new List<ElementSearchHit>();
         var seenRoots = new HashSet<long>();
 
@@ -1252,7 +1294,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             if (root == null || root.Address == 0 || !seenRoots.Add((long)root.Address))
                 continue;
 
-            FindWellElements(root, null, name, 0, maxDepth, maxHits, hits);
+            FindWellElements(root, null, name, 0, maxDepth, maxHits, terms, hits);
             if (hits.Count >= maxHits)
                 break;
         }
@@ -1270,33 +1312,39 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         yield return ("ingameUi.Parent", TryGetElementProperty(ingameUi, "Parent"));
     }
 
-    private static void FindWellElements(Element element, Element? parent, string path, int depth, int maxDepth, int maxHits, List<ElementSearchHit> hits)
+    private static List<ElementSearchHit> MergeSearchHits(IEnumerable<ElementSearchHit> primaryHits, IEnumerable<ElementSearchHit> fallbackHits, int maxHits)
+    {
+        var merged = new List<ElementSearchHit>();
+        var seen = new HashSet<long>();
+
+        AddRange(primaryHits);
+        AddRange(fallbackHits);
+        return merged;
+
+        void AddRange(IEnumerable<ElementSearchHit> hits)
+        {
+            foreach (var hit in hits)
+            {
+                if (merged.Count >= maxHits)
+                    return;
+
+                if (hit.Element.Address != 0 && !seen.Add((long)hit.Element.Address))
+                    continue;
+
+                merged.Add(hit);
+                if (merged.Count >= maxHits)
+                    return;
+            }
+        }
+    }
+
+    private static void FindWellElements(Element element, Element? parent, string path, int depth, int maxDepth, int maxHits, IReadOnlyList<string> terms, List<ElementSearchHit> hits)
     {
         if (depth > maxDepth || hits.Count >= maxHits)
             return;
 
         string text = string.Join(" ", ReadStringishProperties(element).Values);
-        if (ContainsAnyText(text, [
-                "The Well of Souls",
-                "Options",
-                "Desecrated Modifier",
-                "Reveal",
-                "Confirm",
-                "Presence",
-                "Critical Hit Chance",
-                "Mana Regeneration",
-                "Life Regeneration",
-                "Life Regen",
-                "Energy Shield",
-                "Recharge Rate",
-                "Strength",
-                "Dexterity",
-                "Intelligence",
-                "Spirit",
-                "Resistance",
-                "Threshold",
-                "Deflection"
-            ]))
+        if (ContainsAnyText(text, terms))
             hits.Add(new ElementSearchHit(path.Split('.')[0], path, element, parent));
 
         if (depth == maxDepth)
@@ -1307,7 +1355,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             int index = 0;
             foreach (var child in element.Children)
             {
-                FindWellElements(child, element, $"{path}.children[{index}]", depth + 1, maxDepth, maxHits, hits);
+                FindWellElements(child, element, $"{path}.children[{index}]", depth + 1, maxDepth, maxHits, terms, hits);
                 if (hits.Count >= maxHits)
                     break;
                 index++;
