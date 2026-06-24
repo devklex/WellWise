@@ -40,6 +40,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private DateTime _nextBroadScanAt = DateTime.MinValue;
     private DateTime _partialCooldownUntil = DateTime.MinValue;
     private int _consecutivePartialReads;
+    private bool _outsideWellIdle;
 
     private static readonly TimeSpan ScanInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan BroadScanInterval = TimeSpan.FromMilliseconds(4000);
@@ -80,6 +81,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _nextScanAt = DateTime.MinValue;
         _nextBroadScanAt = DateTime.MinValue;
         _partialCooldownUntil = DateTime.MinValue;
+        _outsideWellIdle = false;
     }
 
     public override void Render()
@@ -92,15 +94,22 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         bool inWellArea = IsWellOfSoulsArea(areaInfo);
         if (!inWellArea)
         {
-            ClearWellState();
-            Settings.LastStatus.Value = _resolver.LoadStatus;
-            Settings.LastContext.Value = "No Well item context";
-            Settings.LastOptions.Value = "Outside The Well of Souls area";
-            _nextScanAt = now + IdleScanInterval;
-            _nextBroadScanAt = now + IdleBroadScanInterval;
+            if (!_outsideWellIdle)
+            {
+                ClearWellState();
+                Settings.LastStatus.Value = _resolver.LoadStatus;
+                Settings.LastContext.Value = "No Well item context";
+                Settings.LastOptions.Value = "Outside The Well of Souls area";
+                _nextScanAt = now + IdleScanInterval;
+                _nextBroadScanAt = now + IdleBroadScanInterval;
+                _outsideWellIdle = true;
+            }
+
             DrawAreaDebugOverlay(areaInfo, false);
             return;
         }
+
+        _outsideWellIdle = false;
 
         if (now >= _nextScanAt)
         {
@@ -281,6 +290,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _nextScanAt = DateTime.MinValue;
         _nextBroadScanAt = DateTime.MinValue;
         _partialCooldownUntil = DateTime.MinValue;
+        _outsideWellIdle = false;
     }
 
     private void ExportDiagnosticReport()
@@ -329,7 +339,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             WellState freshState;
             try
             {
-                freshState = ReadWellState(allowBroadSearch: true);
+                freshState = ReadWellState(allowBroadSearch: true, updateCache: false);
             }
             catch (Exception ex)
             {
@@ -751,7 +761,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         return true;
     }
 
-    private WellState ReadWellState(bool allowBroadSearch)
+    private WellState ReadWellState(bool allowBroadSearch, bool updateCache = true)
     {
         try
         {
@@ -770,14 +780,16 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
                 StoreFallback(cachedState, cachedRoot);
             }
 
-            _cachedWellRoot = null;
+            if (updateCache)
+                _cachedWellRoot = null;
 
             var directState = TryReadLikelyWellState(out var directRoot);
             if (directState != null)
             {
                 if (HasCompleteOptions(directState))
                 {
-                    _cachedWellRoot = directRoot;
+                    if (updateCache)
+                        _cachedWellRoot = directRoot;
                     return AttachAvailableWellContext(directState);
                 }
 
@@ -798,7 +810,8 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
                 if (HasCompleteOptions(state))
                 {
-                    _cachedWellRoot = root;
+                    if (updateCache)
+                        _cachedWellRoot = root;
                     return AttachAvailableWellContext(state);
                 }
 
@@ -824,13 +837,13 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             {
                 if (partialVisibleState != null)
                 {
-                    _cachedWellRoot = partialVisibleRoot;
+                    if (updateCache)
+                        _cachedWellRoot = partialVisibleRoot;
                     return AttachAvailableWellContext(partialVisibleState);
                 }
 
                 if (emptyVisibleState != null)
                 {
-                    _cachedWellRoot = emptyVisibleRoot;
                     return AttachAvailableWellContext(emptyVisibleState);
                 }
 
@@ -1061,12 +1074,22 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         if (left == null || right == null)
             return false;
 
-        if (!string.IsNullOrWhiteSpace(left.BaseName) &&
-            left.BaseName.Equals(right.BaseName, StringComparison.OrdinalIgnoreCase))
-            return true;
+        bool sameBase = !string.IsNullOrWhiteSpace(left.BaseName) &&
+                        left.BaseName.Equals(right.BaseName, StringComparison.OrdinalIgnoreCase);
+        bool sameUnique = !string.IsNullOrWhiteSpace(left.UniqueName) &&
+                          left.UniqueName.Equals(right.UniqueName, StringComparison.OrdinalIgnoreCase);
+        if (!sameBase && !sameUnique)
+            return false;
 
-        return !string.IsNullOrWhiteSpace(left.UniqueName) &&
-               left.UniqueName.Equals(right.UniqueName, StringComparison.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(left.ClassName) &&
+            !string.IsNullOrWhiteSpace(right.ClassName) &&
+            !left.ClassName.Equals(right.ClassName, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (left.ItemLevel > 0 && right.ItemLevel > 0 && left.ItemLevel != right.ItemLevel)
+            return false;
+
+        return true;
     }
 
     private static List<WellOption> ReadOptionsFromFixedPaths(Element root)
