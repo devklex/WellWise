@@ -84,40 +84,23 @@ public sealed class WellOfSoulsTierResolver
         values = ExtractValuesForRule(rule, text);
         value = values.Count > 0 ? values[0] : null;
         int itemLevel = item?.ItemLevel > 0 ? item.ItemLevel : Math.Max(0, fallbackItemLevel);
+        var allTiers = rule.Tiers
+            .OrderBy(tier => tier.Tier)
+            .ToList();
         var availableTiers = rule.Tiers
             .Where(tier => itemLevel > 0 ? tier.ItemLevel <= itemLevel : true)
             .OrderBy(tier => tier.Tier)
             .ToList();
 
-        if (availableTiers.Count == 0)
-        {
-            var absolute = rule.Tiers.OrderBy(tier => tier.Tier).FirstOrDefault();
-            return new WellOfSoulsTierResult(
-                Known: true,
-                Source: _database.Source,
-                RuleId: rule.Id,
-                Label: rule.Label,
-                AffixType: DisplayAffixType(rule),
-                OptionText: text,
-                CurrentValue: value,
-                CurrentTier: null,
-                BestTier: null,
-                AbsoluteBestTier: absolute,
-                Summary: "known stat; no tier unlocked at this ilvl",
-                Detail: $"needs ilvl {rule.Tiers.Min(tier => tier.ItemLevel)}+");
-        }
-
         List<WellTierRange> currentTierMatches = values.Count == 0
             ? []
-            : availableTiers.Where(tier => tier.Contains(values)).ToList();
+            : allTiers.Where(tier => tier.Contains(values)).ToList();
         WellTierRange? currentTier = currentTierMatches.FirstOrDefault();
-        currentTier ??= values.Count == 0 ? null : FindClosestTier(availableTiers, values);
+        currentTier ??= values.Count == 0 ? null : FindClosestTier(allTiers, values);
         if (currentTierMatches.Count == 0 && currentTier != null)
             currentTierMatches.Add(currentTier);
-        var bestTier = availableTiers.First();
-        var absoluteBestTier = rule.Tiers
-            .OrderBy(tier => tier.Tier)
-            .FirstOrDefault();
+        var bestTier = availableTiers.FirstOrDefault();
+        var absoluteBestTier = allTiers.FirstOrDefault();
 
         string summary = BuildSummary(currentTier, bestTier, absoluteBestTier, rule, itemLevel);
 
@@ -444,14 +427,18 @@ public sealed class WellOfSoulsTierResolver
             currentTier == null ? "known stat" : FormatTier(currentTier, rule)
         };
 
-        bool itemMaxIsCurrent = currentTier != null &&
+        bool itemMaxIsCurrent = bestTier != null &&
+                                currentTier != null &&
                                 bestTier.Tier == currentTier.Tier &&
                                 TierRangesEqual(bestTier, currentTier);
         bool absoluteNeedsHigherLevel = absoluteBestTier != null &&
                                         itemLevel > 0 &&
-                                        absoluteBestTier.ItemLevel > itemLevel;
+                                        absoluteBestTier.ItemLevel > itemLevel &&
+                                        (bestTier == null ||
+                                         bestTier.Tier != absoluteBestTier.Tier ||
+                                         !TierRangesEqual(bestTier, absoluteBestTier));
 
-        if (!itemMaxIsCurrent || absoluteNeedsHigherLevel)
+        if (bestTier != null && (!itemMaxIsCurrent || absoluteNeedsHigherLevel))
             parts.Add($"item max {FormatTier(bestTier, rule)}");
 
         if (absoluteNeedsHigherLevel && absoluteBestTier != null)
