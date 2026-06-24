@@ -755,28 +755,40 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     {
         try
         {
-            var cachedState = TryReadWellStateFromRoot(_cachedWellRoot);
-            if (cachedState != null && (HasCompleteOptions(cachedState) || !allowBroadSearch))
-                return AttachAvailableWellContext(cachedState);
-
-            _cachedWellRoot = null;
-
-            var directState = TryReadLikelyWellState(out var directRoot);
-            if (directState != null && (HasCompleteOptions(directState) || !allowBroadSearch))
-            {
-                _cachedWellRoot = directRoot;
-                return AttachAvailableWellContext(directState);
-            }
-
-            if (!allowBroadSearch)
-                return new WellState([], null);
-
-            var hits = FindWellElements(12, 80);
-            var candidateRoots = FindCandidateRoots(hits).Take(12).ToList();
             WellState? partialVisibleState = null;
             Element? partialVisibleRoot = null;
             WellState? emptyVisibleState = null;
             Element? emptyVisibleRoot = null;
+
+            var cachedRoot = _cachedWellRoot;
+            var cachedState = TryReadWellStateFromRoot(cachedRoot);
+            if (cachedState != null)
+            {
+                if (HasCompleteOptions(cachedState))
+                    return AttachAvailableWellContext(cachedState);
+
+                StoreFallback(cachedState, cachedRoot);
+            }
+
+            _cachedWellRoot = null;
+
+            var directState = TryReadLikelyWellState(out var directRoot);
+            if (directState != null)
+            {
+                if (HasCompleteOptions(directState))
+                {
+                    _cachedWellRoot = directRoot;
+                    return AttachAvailableWellContext(directState);
+                }
+
+                StoreFallback(directState, directRoot);
+            }
+
+            if (!allowBroadSearch)
+                return ReturnBestFallback();
+
+            var hits = FindWellElements(12, 80);
+            var candidateRoots = FindCandidateRoots(hits).Take(12).ToList();
 
             foreach (var root in candidateRoots)
             {
@@ -790,33 +802,39 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
                     return AttachAvailableWellContext(state);
                 }
 
+                StoreFallback(state, root);
+            }
+
+            return ReturnBestFallback();
+
+            void StoreFallback(WellState state, Element? root)
+            {
                 if (HasPartialOptions(state))
                 {
                     partialVisibleState ??= state;
                     partialVisibleRoot ??= root;
-                    continue;
+                    return;
                 }
 
                 emptyVisibleState ??= state;
                 emptyVisibleRoot ??= root;
             }
 
-            if (partialVisibleState != null)
+            WellState ReturnBestFallback()
             {
-                _cachedWellRoot = partialVisibleRoot;
-                return AttachAvailableWellContext(partialVisibleState);
-            }
+                if (partialVisibleState != null)
+                {
+                    _cachedWellRoot = partialVisibleRoot;
+                    return AttachAvailableWellContext(partialVisibleState);
+                }
 
-            if (emptyVisibleState != null)
-            {
-                _cachedWellRoot = emptyVisibleRoot;
-                return AttachAvailableWellContext(emptyVisibleState);
-            }
+                if (emptyVisibleState != null)
+                {
+                    _cachedWellRoot = emptyVisibleRoot;
+                    return AttachAvailableWellContext(emptyVisibleState);
+                }
 
-            if (directState != null)
-            {
-                _cachedWellRoot = directRoot;
-                return AttachAvailableWellContext(directState);
+                return new WellState([], null);
             }
         }
         catch (Exception ex)
