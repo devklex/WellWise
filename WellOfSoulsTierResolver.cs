@@ -190,7 +190,7 @@ public sealed class WellOfSoulsTierResolver
         if (rule.ItemClassContains.Count == 0)
             return false;
 
-        if (!HasItemContext(item))
+        if (item == null || string.IsNullOrWhiteSpace(item.ClassName))
             return false;
 
         return ItemClassMatcher.MatchesAny(item.ClassName, rule.ItemClassContains);
@@ -209,7 +209,7 @@ public sealed class WellOfSoulsTierResolver
         if (rule.ItemClassContains.Count == 0)
             return -100;
 
-        if (!HasItemContext(item))
+        if (item == null || string.IsNullOrWhiteSpace(item.ClassName))
             return -100;
 
         return ItemClassMatcher.MatchesAny(item.ClassName, rule.ItemClassContains) ? 100 : -100;
@@ -420,7 +420,7 @@ public sealed class WellOfSoulsTierResolver
         return string.Join(separator, ranges.Select(range => FormatValueRange(range, rule, useRuleDecorationFallback)));
     }
 
-    private static string BuildSummary(WellTierRange? currentTier, WellTierRange bestTier, WellTierRange? absoluteBestTier, WellTierRule rule, int itemLevel)
+    private static string BuildSummary(WellTierRange? currentTier, WellTierRange? bestTier, WellTierRange? absoluteBestTier, WellTierRule rule, int itemLevel)
     {
         var parts = new List<string>
         {
