@@ -11,7 +11,11 @@ var tests = new (string Name, Action Body)[]
     ("body armour hybrid evasion and life resolves hybrid rule", BodyArmourHybridEvasionLife),
     ("belt charm mana-as-armour desecrated mod resolves", BeltManaAsArmour),
     ("jewel skill effect duration resolves", JewelSkillEffectDuration),
-    ("jewel cold penetration resolves", JewelColdPenetration)
+    ("jewel cold penetration resolves", JewelColdPenetration),
+    ("otherworldly ring mana before life resolves", OtherworldlyRingDamageTakenFromManaBeforeLife),
+    ("otherworldly amulet scaled critical chance uses display range", OtherworldlyAmuletFireSpellCriticalChance),
+    ("otherworldly belt no-number stat resolves without fake range", OtherworldlyBeltMeleeSplash),
+    ("otherworldly accessory rules stay class-specific", OtherworldlyAccessoryRulesStayClassSpecific)
 };
 
 int failures = 0;
@@ -129,6 +133,41 @@ static void JewelColdPenetration()
     AssertContains(result.Label, "Cold Resistance", "jewel cold penetration label");
 }
 
+static void OtherworldlyRingDamageTakenFromManaBeforeLife()
+{
+    var result = CreateResolver().Resolve(Item("Ring", 80), "8% of Damage is taken from Mana before Life");
+    AssertKnown(result);
+    AssertEqual(1, result.CurrentTier?.Tier, "otherworldly ring damage taken from mana before life tier");
+    AssertEqualIgnoreCase("prefix", result.AffixType, "otherworldly ring damage taken from mana before life affix type");
+    AssertContains(result.RuleId, "GenesisTreeRingDamageTakenFromManaBeforeLife", "otherworldly ring rule id");
+    AssertContains(result.Summary, "8-12%", "otherworldly ring display range");
+}
+
+static void OtherworldlyAmuletFireSpellCriticalChance()
+{
+    var result = CreateResolver().Resolve(Item("Amulet", 80), "+4% to Fire Spell Critical Hit Chance");
+    AssertKnown(result);
+    AssertEqual(1, result.CurrentTier?.Tier, "otherworldly amulet fire spell crit tier");
+    AssertEqualIgnoreCase("suffix", result.AffixType, "otherworldly amulet fire spell crit affix type");
+    AssertContains(result.RuleId, "GenesisTreeFireSpellBaseCriticalChance", "otherworldly amulet rule id");
+    AssertContains(result.Summary, "+4-5%", "otherworldly amulet crit display range should not use raw 400-500 values");
+}
+
+static void OtherworldlyBeltMeleeSplash()
+{
+    var result = CreateResolver().Resolve(Item("Belt", 80), "Minions' Strikes have Melee Splash");
+    AssertKnownWithoutTier(result);
+    AssertEqualIgnoreCase("suffix", result.AffixType, "otherworldly belt melee splash affix type");
+    AssertContains(result.RuleId, "GenesisTreeBeltMinionMeleeSplash", "otherworldly belt melee splash rule id");
+    AssertEqual("known stat", result.Summary, "otherworldly no-number stat summary");
+}
+
+static void OtherworldlyAccessoryRulesStayClassSpecific()
+{
+    var result = CreateResolver().Resolve(Item("Belt", 80), "8% of Damage is taken from Mana before Life");
+    AssertFalse(result.Known, "ring-only Otherworldly rule should not resolve for a belt");
+}
+
 static void AssertKnown(WellOfSoulsTierResult result)
 {
     if (!result.Known)
@@ -136,6 +175,12 @@ static void AssertKnown(WellOfSoulsTierResult result)
 
     if (result.CurrentTier == null)
         throw new InvalidOperationException($"Expected current tier. Summary: {result.Summary}");
+}
+
+static void AssertKnownWithoutTier(WellOfSoulsTierResult result)
+{
+    if (!result.Known)
+        throw new InvalidOperationException($"Expected known stat, got unknown: {result.Detail}");
 }
 
 static void AssertEqual<T>(T expected, T actual, string label)
