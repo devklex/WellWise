@@ -17,7 +17,13 @@ if ([string]::IsNullOrWhiteSpace($RepoeDataPath)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($SelfPoeDataPath)) {
-    $SelfPoeDataPath = Join-Path $DefaultExRoot "Data\selfpoe_data\data"
+    $decodedSelfPoePath = Join-Path $DefaultExRoot "Data\selfpoe_data_decoded"
+    if (Test-Path -LiteralPath (Join-Path $decodedSelfPoePath "balance\mods.json")) {
+        $SelfPoeDataPath = $decodedSelfPoePath
+    }
+    else {
+        $SelfPoeDataPath = Join-Path $DefaultExRoot "Data\selfpoe_data\data"
+    }
 }
 
 if ([string]::IsNullOrWhiteSpace($WellDataPath)) {
@@ -100,13 +106,30 @@ function Get-DecodedSelfStats {
 
     $result = @()
     for ($i = 1; $i -le 6; $i++) {
-        $statId = Get-StatId $Stats (Get-PropertyValue $Mod "StatsKey$i")
+        $statKey = Get-PropertyValue $Mod "StatsKey$i"
+        if ($null -eq $statKey) {
+            $statKey = Get-PropertyValue $Mod "Stat$i"
+        }
+
+        $statId = Get-StatId $Stats $statKey
         if ([string]::IsNullOrWhiteSpace($statId)) {
             continue
         }
 
-        $min = Get-PropertyValue $Mod "Stat${i}Min"
-        $max = Get-PropertyValue $Mod "Stat${i}Max"
+        $value = Get-PropertyValue $Mod "Stat${i}Value"
+        if ($null -ne $value -and $null -ne $value.PSObject.Properties["min"] -and $null -ne $value.PSObject.Properties["max"]) {
+            $min = $value.min
+            $max = $value.max
+        }
+        else {
+            $min = Get-PropertyValue $Mod "Stat${i}Min"
+            $max = Get-PropertyValue $Mod "Stat${i}Max"
+        }
+
+        if ($null -eq $min -or $null -eq $max) {
+            continue
+        }
+
         if ($min -eq -33554432 -or $max -eq -33554432) {
             continue
         }
@@ -182,7 +205,12 @@ function Get-DecodedSelfSpawnTags {
         [Parameter(Mandatory = $true)]$Tags
     )
 
-    return @($Mod.SpawnWeight_TagsKeys | ForEach-Object { Get-TagName $Tags $_ })
+    $tagKeys = Get-PropertyValue $Mod "SpawnWeight_TagsKeys"
+    if ($null -eq $tagKeys) {
+        $tagKeys = Get-PropertyValue $Mod "SpawnWeight_Tags"
+    }
+
+    return @($tagKeys | ForEach-Object { Get-TagName $Tags $_ })
 }
 
 function Get-TagSignature {
@@ -486,6 +514,12 @@ Set-ValidationProperty $database.validation "selfPoeBroadVisibleMismatches" $bro
 Write-Host "Validated $($breachProperties.Count) breach_desecration rows against selfpoe_data."
 Write-Host "Generated $($generatedRules.Count) Breach/Otherworldly WellWise rules."
 Write-Host "Broad item/desecrated self-vs-repoe visible mismatches: $($broadVisibleMismatches.Count). Full selfpoe replacement remains disabled."
+if ($broadVisibleMismatches.Count -gt 0) {
+    Write-Host "First broad mismatch details:"
+    foreach ($mismatch in @($broadVisibleMismatches | Select-Object -First 10)) {
+        Write-Host ("  {0}: self=[{1}] repoe=[{2}]" -f $mismatch.id, $mismatch.self, $mismatch.repoe)
+    }
+}
 
 if ($CheckOnly) {
     Write-Host "CheckOnly set; not writing $WellDataPath"
