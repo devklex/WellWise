@@ -16,6 +16,9 @@
     <exileCore2Package>$(MSBuildThisFileDirectory)..\..\..\</exileCore2Package>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <Reference Include="ExileCore2">
       <HintPath>$(exileCore2Package)ExileCore2.dll</HintPath>
       <Private>false</Private>

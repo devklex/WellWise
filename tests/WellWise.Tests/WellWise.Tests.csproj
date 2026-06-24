@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <exileCore2Package>$(MSBuildThisFileDirectory)..\..\..\..\..\</exileCore2Package>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\WellWise.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="ExileCore2">
+      <HintPath>$(exileCore2Package)ExileCore2.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameOffsets2">
+      <HintPath>$(exileCore2Package)GameOffsets2.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
