@@ -41,11 +41,16 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private DateTime _partialCooldownUntil = DateTime.MinValue;
     private int _consecutivePartialReads;
     private bool _outsideWellIdle;
+    private string? _diagnosticScanPath;
+    private DateTime _nextDiagnosticScanAt = DateTime.MinValue;
+    private int _diagnosticScanSequence;
 
     private static readonly TimeSpan ScanInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan BroadScanInterval = TimeSpan.FromMilliseconds(4000);
     private static readonly TimeSpan IdleScanInterval = TimeSpan.FromMilliseconds(2000);
     private static readonly TimeSpan IdleBroadScanInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan DiagnosticScanInterval = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan DiagnosticScanIdleInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PartialRetryInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan PartialBroadRetryInterval = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan PartialCooldownInterval = TimeSpan.FromSeconds(5);
@@ -114,6 +119,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _nextBroadScanAt = DateTime.MinValue;
         _partialCooldownUntil = DateTime.MinValue;
         _outsideWellIdle = false;
+        ResetDiagnosticScanSession();
     }
 
     public override void Render()
@@ -124,6 +130,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         var now = DateTime.UtcNow;
         var areaInfo = GetCurrentAreaInfo();
         bool inWellArea = IsWellOfSoulsArea(areaInfo);
+        MaybeRecordDiagnosticScan(now, areaInfo, inWellArea);
         if (!inWellArea)
         {
             if (!_outsideWellIdle)
@@ -204,6 +211,118 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _cachedWellRoot = null;
         _consecutivePartialReads = 0;
         _partialCooldownUntil = DateTime.MinValue;
+    }
+
+    private void ResetDiagnosticScanSession()
+    {
+        _diagnosticScanPath = null;
+        _nextDiagnosticScanAt = DateTime.MinValue;
+        _diagnosticScanSequence = 0;
+    }
+
+    private void MaybeRecordDiagnosticScan(DateTime now, AreaInfo areaInfo, bool inWellArea)
+    {
+        if (!Settings.RecordDiagnosticScan.Value)
+        {
+            if (_diagnosticScanPath != null)
+                Settings.LastDiagnosticCapture.Value = $"Diagnostic scan stopped: {_diagnosticScanPath}";
+
+            ResetDiagnosticScanSession();
+            return;
+        }
+
+        if (now < _nextDiagnosticScanAt)
+            return;
+
+        _nextDiagnosticScanAt = now + (inWellArea ? DiagnosticScanInterval : DiagnosticScanIdleInterval);
+
+        try
+        {
+            EnsureDiagnosticScanPath(now);
+            if (_diagnosticScanPath == null)
+                return;
+
+            var report = new StringBuilder();
+            report.AppendLine($"--- Capture {++_diagnosticScanSequence} {now:O} ---");
+            report.AppendLine($"In Well area: {inWellArea}");
+            report.AppendLine($"InstanceName: {areaInfo.InstanceName}");
+            report.AppendLine($"AreaName: {areaInfo.AreaName}");
+            report.AppendLine($"AreaId: {areaInfo.AreaId}");
+            report.AppendLine($"RawName: {areaInfo.RawName}");
+            report.AppendLine();
+            report.AppendLine("[Scan schedule]");
+            report.AppendLine($"Consecutive partial reads: {_consecutivePartialReads}");
+            report.AppendLine($"Next scan: {FormatSchedule(_nextScanAt, now)}");
+            report.AppendLine($"Next broad scan: {FormatSchedule(_nextBroadScanAt, now)}");
+            report.AppendLine($"Partial cooldown until: {FormatSchedule(_partialCooldownUntil, now)}");
+            report.AppendLine($"Cached root: {FormatElement(_cachedWellRoot)}");
+            report.AppendLine();
+            report.AppendLine("[Last status fields]");
+            report.AppendLine($"LastStatus: {Settings.LastStatus.Value}");
+            report.AppendLine($"LastContext: {Settings.LastContext.Value}");
+            report.AppendLine($"LastOptions: {Settings.LastOptions.Value}");
+            report.AppendLine();
+
+            if (!inWellArea)
+            {
+                report.AppendLine("Skipped Well scan: outside The Well of Souls area.");
+                report.AppendLine();
+            }
+            else
+            {
+                AppendUiRootReport(report);
+
+                WellState freshState;
+                try
+                {
+                    freshState = ReadWellState(allowBroadSearch: true, updateCache: false);
+                }
+                catch (Exception ex)
+                {
+                    freshState = new WellState([], null);
+                    report.AppendLine("[Continuous fresh broad Well read]");
+                    report.AppendLine($"Read failed: {ex}");
+                    report.AppendLine();
+                }
+
+                var freshItem = freshState.ItemContext ?? _itemContext;
+                AppendWellStateReport(report, "Continuous fresh broad Well read", freshState, freshItem, BuildDrawInfos(freshState.Options, freshItem));
+
+                var cachedState = new WellState(_options, _itemContext, WindowVisible: _options.Count > 0);
+                AppendWellStateReport(report, "Continuous cached overlay state", cachedState, _itemContext, _drawInfos);
+
+                AppendCandidateRootReport(report);
+                AppendRuntimeProbeReport(report, freshState, freshItem);
+            }
+
+            File.AppendAllText(_diagnosticScanPath, report.ToString(), Encoding.UTF8);
+            Settings.LastDiagnosticCapture.Value = $"Diagnostic scan #{_diagnosticScanSequence}: {_diagnosticScanPath}";
+        }
+        catch (Exception ex)
+        {
+            Settings.LastDiagnosticCapture.Value = $"Diagnostic scan failed: {ex.Message}";
+            LogDebugFailureLimited("record diagnostic scan", ex);
+        }
+    }
+
+    private void EnsureDiagnosticScanPath(DateTime now)
+    {
+        if (_diagnosticScanPath != null)
+            return;
+
+        var reportDirectory = Path.Combine(DirectoryFullName, "diagnostics");
+        Directory.CreateDirectory(reportDirectory);
+        _diagnosticScanPath = Path.Combine(reportDirectory, $"wellwise-scan-{now:yyyyMMdd-HHmmss}.txt");
+
+        var header = new StringBuilder();
+        header.AppendLine("WellWise continuous diagnostic scan");
+        header.AppendLine($"Started UTC: {now:O}");
+        header.AppendLine($"Plugin directory: {DirectoryFullName}");
+        header.AppendLine($"Assembly version: {GetType().Assembly.GetName().Version}");
+        header.AppendLine("Toggle RecordDiagnosticScan off to stop this file.");
+        header.AppendLine();
+        File.WriteAllText(_diagnosticScanPath, header.ToString(), Encoding.UTF8);
+        Settings.LastDiagnosticCapture.Value = $"Diagnostic scan started: {_diagnosticScanPath}";
     }
 
     private AreaInfo GetCurrentAreaInfo()
@@ -346,6 +465,8 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             report.AppendLine($"ShowOptionText: {Settings.ShowOptionText.Value}");
             report.AppendLine($"ShowAreaDebugOverlay: {Settings.ShowAreaDebugOverlay.Value}");
             report.AppendLine($"DebugMode: {Settings.DebugMode.Value}");
+            report.AppendLine($"RecordDiagnosticScan: {Settings.RecordDiagnosticScan.Value}");
+            report.AppendLine($"LastDiagnosticCapture: {Settings.LastDiagnosticCapture.Value}");
             report.AppendLine();
             report.AppendLine("[Area]");
             report.AppendLine($"In Well area: {IsWellOfSoulsArea(areaInfo)}");
