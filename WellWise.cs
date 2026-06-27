@@ -23,10 +23,21 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private sealed record TextSegment(string Text, Color Color);
     private sealed record PanelLine(List<TextSegment> Segments);
     private sealed record ElementSearchHit(string RootName, string Path, Element Element, Element? Parent);
+    private sealed record ElementCandidate(Element Element, string Path, RectangleF Rect);
+    private sealed record ChoiceRowMatch(Element RowElement, Element TextElement, string Path, string Text, string RawText, RectangleF RowRect, RectangleF TextRect);
     private sealed record WellOption(int Index, string Path, Element Element, Element TextElement, string Text, string RawText, RectangleF Rect);
     private sealed record WellDrawInfo(WellOption Option, WellOfSoulsTierResult TierResult);
-    private sealed record WellState(List<WellOption> Options, ItemSnapshot? ItemContext, bool AwaitingRevealPrompt = false, bool WindowVisible = false);
+    private sealed record WellState(
+        List<WellOption> Options,
+        ItemSnapshot? ItemContext,
+        bool AwaitingRevealPrompt = false,
+        bool WindowVisible = false,
+        bool RevealButtonVisible = false,
+        bool ConfirmButtonVisible = false,
+        bool PromptTextVisible = false);
+    private sealed record WellRootCandidate(Element Root, WellState State, string Source, int Order);
     private sealed record AreaInfo(string InstanceName, string AreaName, string AreaId, string RawName);
+    private sealed record TextCandidate(Element Element, string Path, string Text, string RawText, RectangleF Rect);
 
     private static readonly Regex WellRollValueRegex = new(@"(?<prefix>[+-]?)\s*(?<value>\d+(?:\.\d+)?)(?<suffix>%?)", RegexOptions.Compiled);
 
@@ -39,11 +50,18 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private DateTime _nextScanAt = DateTime.MinValue;
     private DateTime _nextBroadScanAt = DateTime.MinValue;
     private DateTime _partialCooldownUntil = DateTime.MinValue;
+    private DateTime _wellWindowMissingSince = DateTime.MinValue;
+    private DateTime _activeWellTransitionUntil = DateTime.MinValue;
+    private DateTime _softRebindUntil = DateTime.MinValue;
     private int _consecutivePartialReads;
+    private int _consecutiveIncompleteChoiceReads;
+    private int _consecutiveSoftRebinds;
     private bool _outsideWellIdle;
     private string? _diagnosticScanPath;
     private DateTime _nextDiagnosticScanAt = DateTime.MinValue;
     private int _diagnosticScanSequence;
+    private string? _staleChoiceUiNotice;
+    private DateTime _staleChoiceUiNoticeUntil = DateTime.MinValue;
 
     private static readonly TimeSpan ScanInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan BroadScanInterval = TimeSpan.FromMilliseconds(4000);
@@ -52,10 +70,24 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private static readonly TimeSpan DiagnosticScanInterval = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan DiagnosticScanIdleInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PartialRetryInterval = TimeSpan.FromMilliseconds(750);
-    private static readonly TimeSpan PartialBroadRetryInterval = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan PartialBroadRetryInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan PartialCooldownInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan MissingWellRetryInterval = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan MissingWellBroadRetryInterval = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan MissingWellContextGraceInterval = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan ActiveTransitionScanInterval = TimeSpan.FromMilliseconds(150);
+    private static readonly TimeSpan ActiveTransitionBroadInterval = TimeSpan.FromMilliseconds(350);
+    private static readonly TimeSpan ActiveTransitionWindow = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan SoftRebindRetryInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan SoftRebindBroadInterval = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan SoftRebindWindow = TimeSpan.FromSeconds(2);
     private static readonly JsonSerializerOptions DiagnosticJsonOptions = new() { WriteIndented = true };
     private const int MaxConsecutivePartialReads = 6;
+    private const int PartialSoftRebindThreshold = 2;
+    private const int MaxSoftRebindBurstsBeforeManualRefresh = 4;
+    private static readonly TimeSpan StaleChoiceUiRetryInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan StaleChoiceUiBroadRetryInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan StaleChoiceUiNoticeInterval = TimeSpan.FromSeconds(6);
     private static readonly string[] WellPrimarySearchTerms =
     {
         "The Well of Souls",
@@ -115,9 +147,14 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _itemContext = null;
         _cachedWellRoot = null;
         _consecutivePartialReads = 0;
+        _consecutiveIncompleteChoiceReads = 0;
         _nextScanAt = DateTime.MinValue;
         _nextBroadScanAt = DateTime.MinValue;
         _partialCooldownUntil = DateTime.MinValue;
+        _activeWellTransitionUntil = DateTime.MinValue;
+        _softRebindUntil = DateTime.MinValue;
+        _consecutiveSoftRebinds = 0;
+        ClearStaleChoiceUiNotice();
         _outsideWellIdle = false;
         ResetDiagnosticScanSession();
     }
@@ -156,26 +193,66 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             var state = ReadWellState(allowBroadScan);
             if (!state.WindowVisible)
             {
-                ClearWellState();
+                if (IsManualRefreshNoticeActive(now))
+                {
+                    Settings.LastStatus.Value = _resolver.LoadStatus;
+                    Settings.LastContext.Value = FormatContext(_itemContext);
+                    Settings.LastOptions.Value = _staleChoiceUiNotice ?? "Well choice UI is stale; close and reopen the Well window to refresh";
+                    _nextScanAt = now + StaleChoiceUiRetryInterval;
+                    ScheduleBroadScanNoLaterThan(now + StaleChoiceUiBroadRetryInterval);
+                    DrawStaleChoiceUiNotice(now);
+                    return;
+                }
+
+                if (_wellWindowMissingSince == DateTime.MinValue)
+                    _wellWindowMissingSince = now;
+
+                bool withinMissingGrace = now - _wellWindowMissingSince < MissingWellContextGraceInterval;
+                bool hasRecoverableSession = withinMissingGrace && (_itemContext != null || _options.Count > 0 || _drawInfos.Count > 0);
+                if (!withinMissingGrace)
+                    ClearWellState(resetMissingWindowTimer: false);
+
                 Settings.LastStatus.Value = _resolver.LoadStatus;
-                Settings.LastContext.Value = "No Well item context";
+                Settings.LastContext.Value = FormatContext(_itemContext);
                 Settings.LastOptions.Value = "Well of Souls not visible";
-                _nextScanAt = now + IdleScanInterval;
-                if (allowBroadScan)
-                    _nextBroadScanAt = now + IdleBroadScanInterval;
+                if (hasRecoverableSession)
+                {
+                    bool activeTransition = now <= _activeWellTransitionUntil;
+                    _nextScanAt = now + (activeTransition ? ActiveTransitionScanInterval : MissingWellRetryInterval);
+                    ScheduleBroadScanNoLaterThan(now + (activeTransition ? ActiveTransitionBroadInterval : MissingWellBroadRetryInterval));
+                }
+                else
+                {
+                    _nextScanAt = now + IdleScanInterval;
+                    ScheduleBroadScanNoLaterThan(now + BroadScanInterval);
+                }
+
                 return;
             }
+
+            _wellWindowMissingSince = DateTime.MinValue;
 
             if (HandlePartialOptionRead(state, now))
             {
                 DrawWellOptions(_drawInfos);
+                DrawStaleChoiceUiNotice(now);
                 return;
             }
 
+            bool useActiveTransitionCadence = false;
             if (state.AwaitingRevealPrompt)
             {
                 _options = [];
-                _itemContext = state.ItemContext;
+                _drawInfos = [];
+                _consecutivePartialReads = 0;
+                _consecutiveIncompleteChoiceReads = 0;
+                _consecutiveSoftRebinds = 0;
+                _softRebindUntil = DateTime.MinValue;
+                ClearStaleChoiceUiNotice();
+                _activeWellTransitionUntil = now + ActiveTransitionWindow;
+                useActiveTransitionCadence = true;
+                if (state.ItemContext != null)
+                    PreserveOrUpdateItemContext(state.ItemContext, now);
             }
             else
             {
@@ -184,34 +261,114 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
                 else if (state.ItemContext == null || !SameWellItemContext(state.ItemContext, _itemContext))
                     _options = [];
 
-                if (state.ItemContext != null || _options.Count == 0)
-                    _itemContext = state.ItemContext;
+                if (state.ItemContext != null)
+                    PreserveOrUpdateItemContext(state.ItemContext, now);
+
+                if (state.Options.Count >= 3)
+                {
+                    _activeWellTransitionUntil = DateTime.MinValue;
+                    _softRebindUntil = DateTime.MinValue;
+                    _consecutiveSoftRebinds = 0;
+                    _consecutiveIncompleteChoiceReads = 0;
+                    ClearStaleChoiceUiNotice();
+                }
+                else if (state.Options.Count == 0 && _itemContext != null && now <= _activeWellTransitionUntil)
+                    useActiveTransitionCadence = true;
             }
 
             _drawInfos = BuildDrawInfos(_options, _itemContext);
             Settings.LastStatus.Value = _resolver.LoadStatus;
             Settings.LastContext.Value = FormatContext(_itemContext);
-            Settings.LastOptions.Value = _options.Count == 0 ? "No Well options found" : $"{_options.Count} Well options";
+            Settings.LastOptions.Value = state.AwaitingRevealPrompt
+                ? "Well prompt visible; waiting for reveal"
+                : _options.Count == 0 ? "No Well options found" : $"{_options.Count} Well options";
             _consecutivePartialReads = 0;
+            if (state.Options.Count >= 3 || state.AwaitingRevealPrompt)
+                _consecutiveIncompleteChoiceReads = 0;
             _partialCooldownUntil = DateTime.MinValue;
-            _nextScanAt = now + ScanInterval;
+            _nextScanAt = now + (useActiveTransitionCadence ? ActiveTransitionScanInterval : ScanInterval);
             if (allowBroadScan)
                 _nextBroadScanAt = now + BroadScanInterval;
+            if (useActiveTransitionCadence)
+                ScheduleBroadScanNoLaterThan(now + ActiveTransitionBroadInterval);
         }
 
         DrawWellOptions(_drawInfos);
+        DrawStaleChoiceUiNotice(now);
         DrawAreaDebugOverlay(areaInfo, true);
     }
 
-    private void ClearWellState()
+    private void ClearWellState(bool resetMissingWindowTimer = true)
     {
         _options = [];
         _drawInfos = [];
         _itemContext = null;
         _cachedWellRoot = null;
         _consecutivePartialReads = 0;
+        _consecutiveIncompleteChoiceReads = 0;
         _partialCooldownUntil = DateTime.MinValue;
+        _activeWellTransitionUntil = DateTime.MinValue;
+        _softRebindUntil = DateTime.MinValue;
+        _consecutiveSoftRebinds = 0;
+        ClearStaleChoiceUiNotice();
+        if (resetMissingWindowTimer)
+            _wellWindowMissingSince = DateTime.MinValue;
     }
+
+    private void ScheduleBroadScanNoLaterThan(DateTime target)
+    {
+        if (_nextBroadScanAt == DateTime.MinValue || _nextBroadScanAt > target)
+            _nextBroadScanAt = target;
+    }
+
+    private void ForceWellUiSoftRebind(DateTime now, string status)
+    {
+        _cachedWellRoot = null;
+        _options = [];
+        _drawInfos = [];
+        _partialCooldownUntil = DateTime.MinValue;
+        _activeWellTransitionUntil = now + ActiveTransitionWindow;
+        _softRebindUntil = now + SoftRebindWindow;
+        _consecutiveSoftRebinds++;
+        _nextScanAt = now + SoftRebindRetryInterval;
+        _nextBroadScanAt = now + SoftRebindBroadInterval;
+        Settings.LastStatus.Value = _resolver.LoadStatus;
+        Settings.LastContext.Value = FormatContext(_itemContext);
+        Settings.LastOptions.Value = status;
+    }
+
+    private void MarkWellUiNeedsManualRefresh(DateTime now, int optionCount)
+    {
+        _cachedWellRoot = null;
+        _options = [];
+        _drawInfos = [];
+        _softRebindUntil = DateTime.MinValue;
+        _partialCooldownUntil = DateTime.MinValue;
+        _nextScanAt = now + StaleChoiceUiRetryInterval;
+        _nextBroadScanAt = now + StaleChoiceUiBroadRetryInterval;
+        Settings.LastStatus.Value = _resolver.LoadStatus;
+        Settings.LastContext.Value = FormatContext(_itemContext);
+        string message = optionCount <= 0
+            ? "Well choice UI is visible but ExileCore exposes 0/3 rows; close and reopen the Well window to refresh"
+            : $"Well choice UI is stale ({optionCount}/3 rows); close and reopen the Well window to refresh";
+        Settings.LastOptions.Value = message;
+        SetStaleChoiceUiNotice(now, message);
+    }
+
+    private void SetStaleChoiceUiNotice(DateTime now, string message)
+    {
+        _staleChoiceUiNotice = message;
+        _staleChoiceUiNoticeUntil = now + StaleChoiceUiNoticeInterval;
+    }
+
+    private void ClearStaleChoiceUiNotice()
+    {
+        _staleChoiceUiNotice = null;
+        _staleChoiceUiNoticeUntil = DateTime.MinValue;
+    }
+
+    private bool IsManualRefreshNoticeActive(DateTime now)
+        => !string.IsNullOrWhiteSpace(_staleChoiceUiNotice) && now <= _staleChoiceUiNoticeUntil;
 
     private void ResetDiagnosticScanSession()
     {
@@ -252,9 +409,12 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             report.AppendLine();
             report.AppendLine("[Scan schedule]");
             report.AppendLine($"Consecutive partial reads: {_consecutivePartialReads}");
+            report.AppendLine($"Consecutive incomplete choice reads: {_consecutiveIncompleteChoiceReads}");
             report.AppendLine($"Next scan: {FormatSchedule(_nextScanAt, now)}");
             report.AppendLine($"Next broad scan: {FormatSchedule(_nextBroadScanAt, now)}");
             report.AppendLine($"Partial cooldown until: {FormatSchedule(_partialCooldownUntil, now)}");
+            report.AppendLine($"Soft rebind until: {FormatSchedule(_softRebindUntil, now)}");
+            report.AppendLine($"Consecutive soft rebinds: {_consecutiveSoftRebinds}");
             report.AppendLine($"Cached root: {FormatElement(_cachedWellRoot)}");
             report.AppendLine();
             report.AppendLine("[Last status fields]");
@@ -351,6 +511,27 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
                string.Equals(area.AreaName, "The Well of Souls", StringComparison.OrdinalIgnoreCase);
     }
 
+    private void DrawStaleChoiceUiNotice(DateTime now)
+    {
+        if (!IsManualRefreshNoticeActive(now))
+            return;
+
+        string line1 = "WellWise: Well choice UI is stale";
+        string line2 = "Close and reopen the Well window to refresh labels.";
+        string line3 = "No partial labels are drawn to avoid wrong rows.";
+        float lineHeight = ImGui.GetTextLineHeight();
+        float width = Math.Clamp(new[] { line1, line2, line3 }.Max(line => ImGui.CalcTextSize(line).X) + 18f, 360f, 900f);
+        float height = lineHeight * 3f + 14f;
+        var display = ImGui.GetIO().DisplaySize;
+        var box = ClampToDisplay(new RectangleF(display.X * 0.5f - width * 0.5f, display.Y * 0.16f, width, height));
+
+        Graphics.DrawBox(box, Color.FromArgb(236, 4, 4, 4));
+        Graphics.DrawFrame(box, Color.FromArgb(230, 235, 170, 70), 1);
+        Graphics.DrawText(line1, new Vector2(box.X + 9f, box.Y + 6f), Color.Orange);
+        Graphics.DrawText(line2, new Vector2(box.X + 9f, box.Y + 6f + lineHeight), Color.LightGray);
+        Graphics.DrawText(line3, new Vector2(box.X + 9f, box.Y + 6f + lineHeight * 2f), Color.LightGray);
+    }
+
     private void DrawAreaDebugOverlay(AreaInfo area, bool inWellArea)
     {
         if (!Settings.ShowAreaDebugOverlay.Value)
@@ -396,24 +577,118 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
     private bool HandlePartialOptionRead(WellState state, DateTime now)
     {
-        if (state.Options.Count is 0 or >= 3)
+        bool activeChoiceState = state.WindowVisible &&
+                                 state.ConfirmButtonVisible &&
+                                 !state.RevealButtonVisible &&
+                                 !state.AwaitingRevealPrompt;
+
+        if (state.Options.Count >= 3)
+            return false;
+
+        // A visible Confirm state with 0/3, 1/3, or 2/3 rows is the stale-UI failure seen
+        // after Heart multi-reveal transitions. Treat every incomplete active choice read
+        // as unsafe: never draw partial labels, never preserve partial row order, and retry
+        // only by dropping cached Element handles and forcing re-acquisition.
+        if (activeChoiceState && (_itemContext != null || state.ItemContext != null || state.Options.Count > 0))
+        {
+            _consecutiveIncompleteChoiceReads++;
+            _consecutivePartialReads = state.Options.Count > 0 ? _consecutivePartialReads + 1 : 0;
+            _options = [];
+            _drawInfos = [];
+
+            if (state.ItemContext != null)
+            {
+                bool sameItem = _itemContext == null || SameWellItemContext(state.ItemContext, _itemContext);
+                if (!sameItem)
+                {
+                    _cachedWellRoot = null;
+                    Settings.LastStatus.Value = _resolver.LoadStatus;
+                    Settings.LastContext.Value = FormatContext(_itemContext);
+                    Settings.LastOptions.Value = $"Ignoring incomplete Well choices from different item ({state.Options.Count}/3); retrying";
+                    _nextScanAt = now + PartialRetryInterval;
+                    ScheduleBroadScanNoLaterThan(now + PartialBroadRetryInterval);
+                    return true;
+                }
+
+                PreserveOrUpdateItemContext(state.ItemContext, now);
+            }
+
+            Settings.LastStatus.Value = _resolver.LoadStatus;
+            Settings.LastContext.Value = FormatContext(_itemContext);
+
+            if (_consecutiveSoftRebinds >= MaxSoftRebindBurstsBeforeManualRefresh)
+            {
+                MarkWellUiNeedsManualRefresh(now, state.Options.Count);
+                return true;
+            }
+
+            if (_consecutiveIncompleteChoiceReads >= PartialSoftRebindThreshold && now >= _softRebindUntil)
+            {
+                ForceWellUiSoftRebind(now, state.Options.Count <= 0
+                    ? "Incomplete Well choice UI (0/3); soft-rebinding Well UI state"
+                    : $"Incomplete Well choice UI ({state.Options.Count}/3); soft-rebinding Well UI state");
+                return true;
+            }
+
+            bool inSoftRebindBurst = now < _softRebindUntil;
+            _nextScanAt = now + (inSoftRebindBurst ? SoftRebindRetryInterval : PartialRetryInterval);
+            ScheduleBroadScanNoLaterThan(now + (inSoftRebindBurst ? SoftRebindBroadInterval : ActiveTransitionBroadInterval));
+            Settings.LastOptions.Value = inSoftRebindBurst
+                ? $"Incomplete Well choice UI ({state.Options.Count}/3); soft rebind active, retrying without labels"
+                : $"Incomplete Well choice UI ({state.Options.Count}/3); retrying without labels";
+            return true;
+        }
+
+        if (state.Options.Count == 0)
             return false;
 
         _consecutivePartialReads++;
-        bool sameItem = SameWellItemContext(state.ItemContext, _itemContext);
-        if (!sameItem || _options.Count < 3)
+        _consecutiveIncompleteChoiceReads++;
+
+        bool sameItemForPartial = state.ItemContext != null && SameWellItemContext(state.ItemContext, _itemContext);
+        bool canInheritCurrentContext = state.ItemContext == null && _itemContext != null;
+
+        if (state.ItemContext != null)
+        {
+            if (_itemContext != null && !sameItemForPartial)
+            {
+                _options = [];
+                _drawInfos = [];
+                _cachedWellRoot = null;
+                Settings.LastStatus.Value = _resolver.LoadStatus;
+                Settings.LastContext.Value = FormatContext(_itemContext);
+                Settings.LastOptions.Value = $"Ignoring partial Well options from different item ({state.Options.Count}/3); retrying";
+                _nextScanAt = now + PartialRetryInterval;
+                ScheduleBroadScanNoLaterThan(now + PartialBroadRetryInterval);
+                return true;
+            }
+
+            PreserveOrUpdateItemContext(state.ItemContext, now);
+        }
+        else if (!canInheritCurrentContext)
         {
             _options = [];
             _drawInfos = [];
-            _itemContext = state.ItemContext;
         }
 
+        // Outside the active Confirm state, partial reads are still not safe to draw.
+        _options = [];
+        _drawInfos = [];
         _cachedWellRoot = null;
+
         Settings.LastStatus.Value = _resolver.LoadStatus;
         Settings.LastContext.Value = FormatContext(_itemContext);
 
         if (_consecutivePartialReads >= MaxConsecutivePartialReads)
         {
+            if (now <= _activeWellTransitionUntil)
+            {
+                _nextScanAt = now + PartialRetryInterval;
+                ScheduleBroadScanNoLaterThan(now + ActiveTransitionBroadInterval);
+                Settings.LastOptions.Value = $"Partial Well options during reveal transition ({state.Options.Count}/3); retrying without cooldown";
+                return true;
+            }
+
             _partialCooldownUntil = now + PartialCooldownInterval;
             _nextScanAt = _partialCooldownUntil;
             _nextBroadScanAt = _partialCooldownUntil;
@@ -422,8 +697,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         }
 
         _nextScanAt = now + PartialRetryInterval;
-        if (_nextBroadScanAt <= now)
-            _nextBroadScanAt = now + PartialBroadRetryInterval;
+        ScheduleBroadScanNoLaterThan(now + PartialBroadRetryInterval);
 
         Settings.LastOptions.Value = $"Partial Well options ({state.Options.Count}/3); retrying {_consecutivePartialReads}/{MaxConsecutivePartialReads}";
         return true;
@@ -438,9 +712,14 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _itemContext = null;
         _cachedWellRoot = null;
         _consecutivePartialReads = 0;
+        _consecutiveIncompleteChoiceReads = 0;
         _nextScanAt = DateTime.MinValue;
         _nextBroadScanAt = DateTime.MinValue;
         _partialCooldownUntil = DateTime.MinValue;
+        _activeWellTransitionUntil = DateTime.MinValue;
+        _softRebindUntil = DateTime.MinValue;
+        _consecutiveSoftRebinds = 0;
+        ClearStaleChoiceUiNotice();
         _outsideWellIdle = false;
     }
 
@@ -478,9 +757,12 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             AppendUiRootReport(report);
             report.AppendLine("[Scan schedule]");
             report.AppendLine($"Consecutive partial reads: {_consecutivePartialReads}");
+            report.AppendLine($"Consecutive incomplete choice reads: {_consecutiveIncompleteChoiceReads}");
             report.AppendLine($"Next scan: {FormatSchedule(_nextScanAt, now)}");
             report.AppendLine($"Next broad scan: {FormatSchedule(_nextBroadScanAt, now)}");
             report.AppendLine($"Partial cooldown until: {FormatSchedule(_partialCooldownUntil, now)}");
+            report.AppendLine($"Soft rebind until: {FormatSchedule(_softRebindUntil, now)}");
+            report.AppendLine($"Consecutive soft rebinds: {_consecutiveSoftRebinds}");
             report.AppendLine($"Cached root: {FormatElement(_cachedWellRoot)}");
             report.AppendLine();
             report.AppendLine("[Last status fields]");
@@ -570,7 +852,13 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
                     continue;
                 }
 
-                report.AppendLine($"  State: visible={state.WindowVisible}, awaitingReveal={state.AwaitingRevealPrompt}, options={state.Options.Count}, context={FormatContext(state.ItemContext)}");
+                report.AppendLine($"  State: visible={state.WindowVisible}, awaitingReveal={state.AwaitingRevealPrompt}, options={state.Options.Count}, context={FormatContext(state.ItemContext)}, score={ScoreWellState(state)}, cacheable={IsVisibleWellAnchorState(state)}");
+                AppendCandidateRootButtonTextProbe(report, root);
+                if (state.Options.Count < 3)
+                {
+                    AppendCandidateRootChoiceTextProbe(report, root);
+                    AppendCandidateRootFixedPathProbe(report, root);
+                }
                 foreach (var option in state.Options)
                     report.AppendLine($"  Option {option.Index}: {TrimForReport(option.Text, 180)} | path={option.Path} | rect={FormatRect(option.Rect)} | element={FormatElement(option.TextElement)}");
             }
@@ -581,6 +869,126 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         }
 
         report.AppendLine();
+    }
+
+    private void AppendCandidateRootButtonTextProbe(StringBuilder report, Element root)
+    {
+        try
+        {
+            bool revealButtonVisible = ElementSubtreeContainsExactVisibleText(root, ["Reveal"], 10, 320);
+            bool confirmButtonVisible = ElementSubtreeContainsExactVisibleText(root, ["Confirm"], 10, 320);
+            bool promptTextVisible = ElementSubtreeContainsText(root, ["Place an item with an Unrevealed Desecrated Modifier"], 8, 240);
+            report.AppendLine($"  Buttons/text: revealButton={revealButtonVisible}, confirmButton={confirmButtonVisible}, promptText={promptTextVisible}");
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"  Buttons/text: failed: {ex.Message}");
+        }
+    }
+
+    private void AppendCandidateRootChoiceTextProbe(StringBuilder report, Element root)
+    {
+        try
+        {
+            if (!TryGetChoiceTextFallbackArea(root, out var choiceArea, out var reason))
+            {
+                report.AppendLine($"  Choice-text probe: unavailable ({reason})");
+                return;
+            }
+
+            if (!TryGetRect(root, out var rootRect) || !IsDrawableRect(rootRect))
+            {
+                report.AppendLine($"  Choice-text probe: unavailable (bad root rect)");
+                return;
+            }
+
+            var localCandidates = CollectChoiceTextStackCandidates(root, choiceArea)
+                .OrderBy(candidate => candidate.Rect.Y)
+                .ThenBy(candidate => candidate.Rect.X)
+                .Take(8)
+                .ToList();
+            var screenCandidates = CanUseScreenLocalChoiceFallback(root)
+                ? CollectChoiceTextStackScreenCandidates(choiceArea, rootRect)
+                    .OrderBy(candidate => candidate.Rect.Y)
+                    .ThenBy(candidate => candidate.Rect.X)
+                    .Take(8)
+                    .ToList()
+                : new List<TextCandidate>();
+            var knownListOptions = ReadOptionsFromKnownOptionList(root)
+                .OrderBy(option => option.Rect.Y)
+                .ThenBy(option => option.Rect.X)
+                .Take(8)
+                .ToList();
+
+            report.AppendLine($"  Choice-text probe: area={FormatRect(choiceArea)}, localCandidates={localCandidates.Count}, screenCandidates={screenCandidates.Count}, knownListOptions={knownListOptions.Count}");
+            foreach (var candidate in localCandidates.Take(5))
+                report.AppendLine($"    local text: {TrimForReport(candidate.Text, 120)} | path={candidate.Path} | rect={FormatRect(candidate.Rect)}");
+            foreach (var candidate in screenCandidates.Take(5))
+                report.AppendLine($"    screen text: {TrimForReport(candidate.Text, 120)} | path={candidate.Path} | rect={FormatRect(candidate.Rect)}");
+            foreach (var option in knownListOptions.Take(5))
+                report.AppendLine($"    known-list option: {TrimForReport(option.Text, 120)} | path={option.Path} | rect={FormatRect(option.Rect)}");
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"  Choice-text probe failed: {ex.Message}");
+        }
+    }
+
+
+    private void AppendCandidateRootFixedPathProbe(StringBuilder report, Element root)
+    {
+        try
+        {
+            int[][] optionPaths =
+            [
+                [4, 0, 0, 0],
+                [4, 0, 1, 0],
+                [4, 0, 2, 0]
+            ];
+
+            bool hasChoiceArea = TryGetChoiceTextFallbackArea(root, out var choiceArea, out _);
+            report.AppendLine("  Fixed-path probe:");
+            for (int index = 0; index < optionPaths.Length; index++)
+            {
+                var path = optionPaths[index];
+                var container = FollowChildChain(root, path);
+                if (container == null || container.Address == 0)
+                {
+                    report.AppendLine($"    {string.Join(",", path)}: missing");
+                    continue;
+                }
+
+                var textElement = FindChoiceTextElement(container);
+                var hiddenTextElement = textElement == null ? FindChoiceTextElementIncludingNonVisibleText(container) : null;
+                var inspectedTextElement = textElement ?? hiddenTextElement;
+                bool hiddenOnly = textElement == null && hiddenTextElement != null;
+                string acceptedText = string.Empty;
+                string acceptedRaw = string.Empty;
+                RectangleF textRect = default;
+                bool hasTextRect = false;
+                if (inspectedTextElement != null)
+                {
+                    (acceptedText, acceptedRaw) = ReadElementText(inspectedTextElement);
+                    hasTextRect = TryGetRect(inspectedTextElement, out textRect) && IsDrawableRect(textRect);
+                }
+
+                bool slotMatches = !hasChoiceArea || !hasTextRect || ChoiceTextRectMatchesFixedPathSlot(index, textRect, choiceArea);
+                bool accepted = !hiddenOnly &&
+                                hasTextRect &&
+                                IsAcceptedWellChoiceText(acceptedText, textRect, choiceArea, hasChoiceArea) &&
+                                slotMatches;
+                string rejectReason = accepted ? "" : ExplainRejectedChoiceText(acceptedText, textRect, choiceArea, hasChoiceArea, hasTextRect);
+                if (hiddenOnly)
+                    rejectReason = string.IsNullOrEmpty(rejectReason) || rejectReason == "unknown" ? "hidden-stale-text" : rejectReason + ";hidden-stale-text";
+                if (!accepted && hasChoiceArea && hasTextRect && !slotMatches)
+                    rejectReason = string.IsNullOrEmpty(rejectReason) || rejectReason == "unknown" ? "wrong-fixed-slot" : rejectReason + ";wrong-fixed-slot";
+                report.AppendLine($"    {string.Join(",", path)}: container={FormatElement(container)} textElement={FormatElement(inspectedTextElement)} accepted={accepted} slotMatches={slotMatches} reject={rejectReason} text={TrimForReport(acceptedText, 140)} raw={TrimForReport(acceptedRaw, 140)}");
+            }
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"  Fixed-path probe failed: {ex.Message}");
+        }
     }
 
     private void AppendUiRootReport(StringBuilder report)
@@ -675,15 +1083,73 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         return normalized.Length <= maxLength ? normalized : normalized[..maxLength] + "...";
     }
 
+    private void PreserveOrUpdateItemContext(ItemSnapshot candidate, DateTime now)
+    {
+        if (_itemContext == null)
+        {
+            _itemContext = candidate;
+            return;
+        }
+
+        if (SameWellItemContext(candidate, _itemContext))
+        {
+            _itemContext = MergePreferRicherContext(_itemContext, candidate);
+            return;
+        }
+
+        if (now <= _activeWellTransitionUntil && ContextRichness(_itemContext) >= ContextRichness(candidate))
+            return;
+
+        _itemContext = candidate;
+    }
+
+    private static ItemSnapshot MergePreferRicherContext(ItemSnapshot current, ItemSnapshot candidate)
+        => new()
+        {
+            Source = FirstNonEmpty(candidate.Source, current.Source),
+            BaseName = PreferNonEmpty(candidate.BaseName, current.BaseName),
+            UniqueName = PreferNonEmpty(candidate.UniqueName, current.UniqueName),
+            ClassName = PreferNonEmpty(candidate.ClassName, current.ClassName),
+            ItemLevel = candidate.ItemLevel > 0 ? candidate.ItemLevel : current.ItemLevel
+        };
+
+    private static string PreferNonEmpty(string preferred, string fallback)
+        => string.IsNullOrWhiteSpace(preferred) ? fallback : preferred;
+
+    private static int ContextRichness(ItemSnapshot? item)
+    {
+        if (item == null)
+            return 0;
+
+        int score = 0;
+        if (!string.IsNullOrWhiteSpace(item.UniqueName))
+            score += 4;
+        if (!string.IsNullOrWhiteSpace(item.BaseName))
+            score += 4;
+        if (!string.IsNullOrWhiteSpace(item.ClassName))
+            score += 2;
+        if (item.ItemLevel > 0)
+            score += 1;
+        return score;
+    }
+
     private List<WellDrawInfo> BuildDrawInfos(IReadOnlyList<WellOption> options, ItemSnapshot? item)
     {
         if (options.Count == 0)
             return [];
 
         return options
+            .Where(option => IsSafeOptionForDrawing(option))
             .Select(option => new WellDrawInfo(option, _resolver.Resolve(item, option.Text)))
             .ToList();
     }
+
+    private static bool IsSafeOptionForDrawing(WellOption option)
+        => IsDrawableRect(option.Rect) &&
+           SafeVisible(option.Element) &&
+           SafeVisible(option.TextElement) &&
+           IsWellRowOptionText(option.Text) &&
+           !LooksLikeTooltipOrItemText(option.Text);
 
     private void DrawWellOptions(IReadOnlyList<WellDrawInfo> drawInfos)
     {
@@ -921,89 +1387,52 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     {
         try
         {
-            WellState? partialVisibleState = null;
-            Element? partialVisibleRoot = null;
-            WellState? emptyVisibleState = null;
-            Element? emptyVisibleRoot = null;
+            var candidates = new List<WellRootCandidate>();
+            var seenRoots = new HashSet<long>();
+            int order = 0;
 
             var cachedRoot = _cachedWellRoot;
-            var cachedState = TryReadWellStateFromRoot(cachedRoot);
-            if (cachedState != null)
-            {
-                if (HasCompleteOptions(cachedState))
-                    return AttachAvailableWellContext(cachedState);
+            TryAddCandidateRoot(cachedRoot, "cached");
+            foreach (var root in GetCachedRootNeighborhood(cachedRoot))
+                TryAddCandidateRoot(root, "cached-neighborhood");
 
-                StoreFallback(cachedState, cachedRoot);
+            foreach (var root in GetLikelyWellRoots())
+                TryAddCandidateRoot(root, "likely-root");
+
+            if (allowBroadSearch)
+            {
+                var hits = FindWellElements(12, 80);
+                var candidateRoots = FindCandidateRoots(hits).Take(12).ToList();
+                foreach (var root in candidateRoots)
+                    TryAddCandidateRoot(root, "broad-root");
             }
 
             if (updateCache)
                 _cachedWellRoot = null;
 
-            var directState = TryReadLikelyWellState(out var directRoot);
-            if (directState != null)
+            var best = SelectBestWellCandidate(candidates);
+            if (best == null)
+                return new WellState([], null);
+
+            var bestState = AttachBestCandidateContext(best.State, candidates);
+            if (updateCache && IsVisibleWellAnchorState(bestState))
+                _cachedWellRoot = best.Root;
+
+            return AttachAvailableWellContext(bestState);
+
+            void TryAddCandidateRoot(Element? root, string source)
             {
-                if (HasCompleteOptions(directState))
-                {
-                    if (updateCache)
-                        _cachedWellRoot = directRoot;
-                    return AttachAvailableWellContext(directState);
-                }
+                if (root == null || root.Address == 0)
+                    return;
 
-                StoreFallback(directState, directRoot);
-            }
+                if (!seenRoots.Add((long)root.Address))
+                    return;
 
-            if (!allowBroadSearch)
-                return ReturnBestFallback();
-
-            var hits = FindWellElements(12, 80);
-            var candidateRoots = FindCandidateRoots(hits).Take(12).ToList();
-
-            foreach (var root in candidateRoots)
-            {
                 var state = TryReadWellStateFromRoot(root);
                 if (state == null)
-                    continue;
-
-                if (HasCompleteOptions(state))
-                {
-                    if (updateCache)
-                        _cachedWellRoot = root;
-                    return AttachAvailableWellContext(state);
-                }
-
-                StoreFallback(state, root);
-            }
-
-            return ReturnBestFallback();
-
-            void StoreFallback(WellState state, Element? root)
-            {
-                if (HasPartialOptions(state))
-                {
-                    partialVisibleState ??= state;
-                    partialVisibleRoot ??= root;
                     return;
-                }
 
-                emptyVisibleState ??= state;
-                emptyVisibleRoot ??= root;
-            }
-
-            WellState ReturnBestFallback()
-            {
-                if (partialVisibleState != null)
-                {
-                    if (updateCache)
-                        _cachedWellRoot = partialVisibleRoot;
-                    return AttachAvailableWellContext(partialVisibleState);
-                }
-
-                if (emptyVisibleState != null)
-                {
-                    return AttachAvailableWellContext(emptyVisibleState);
-                }
-
-                return new WellState([], null);
+                candidates.Add(new WellRootCandidate(root, state, source, order++));
             }
         }
         catch (Exception ex)
@@ -1013,6 +1442,155 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
         return new WellState([], null);
     }
+
+    private WellRootCandidate? SelectBestWellCandidate(IReadOnlyList<WellRootCandidate> candidates)
+    {
+        WellRootCandidate? best = null;
+        int bestScore = int.MinValue;
+
+        foreach (var candidate in candidates)
+        {
+            if (IsPartialFromDifferentKnownItem(candidate.State))
+                continue;
+
+            int score = ScoreWellState(candidate.State);
+            if (best == null || score > bestScore || (score == bestScore && candidate.Order < best.Order))
+            {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+
+        return best;
+    }
+
+    private int ScoreWellState(WellState state)
+    {
+        if (!state.WindowVisible)
+            return -10000;
+
+        int score = 0;
+        if (state.Options.Count >= 3)
+            score += 10000;
+        else if (state.Options.Count > 0)
+            score += 2000 + state.Options.Count * 100;
+
+        if (state.AwaitingRevealPrompt)
+            score += 1000;
+
+        // Reveal/Confirm buttons prove this is an active Well window even when the
+        // choice text is temporarily exposed through a sibling subtree. Prefer these
+        // roots over item-tooltip-only roots that merely contain "Well of Souls" text.
+        if (state.ConfirmButtonVisible)
+            score += 700;
+        else if (state.RevealButtonVisible)
+            score += 400;
+
+        if (state.PromptTextVisible && (state.RevealButtonVisible || state.ConfirmButtonVisible))
+            score += 50;
+
+        if (state.ItemContext != null)
+            score += 200 + ContextRichness(state.ItemContext) * 20;
+
+        if (state.ItemContext != null && _itemContext != null && SameWellItemContext(state.ItemContext, _itemContext))
+            score += 300;
+
+        if (state.Options.Count == 0 && !state.AwaitingRevealPrompt && state.ItemContext != null)
+            score -= 500;
+
+        return score;
+    }
+
+    private WellState AttachBestCandidateContext(WellState state, IReadOnlyList<WellRootCandidate> candidates)
+    {
+        if (state.ItemContext != null || state.Options.Count == 0)
+            return state;
+
+        var context = candidates
+            .Where(candidate => candidate.State.ItemContext != null)
+            .Where(candidate => candidate.State.AwaitingRevealPrompt || candidate.State.Options.Count > 0)
+            .Where(candidate => !IsPartialFromDifferentKnownItem(candidate.State))
+            .Where(candidate => _itemContext == null ||
+                                SameWellItemContext(candidate.State.ItemContext, _itemContext) ||
+                                DateTime.UtcNow > _activeWellTransitionUntil)
+            .Select(candidate => candidate.State.ItemContext!)
+            .OrderByDescending(ContextRichness)
+            .FirstOrDefault();
+
+        return context == null
+            ? state
+            : state with { ItemContext = context };
+    }
+
+    private bool IsPartialFromDifferentKnownItem(WellState state)
+        => _itemContext != null &&
+           state.Options.Count is > 0 and < 3 &&
+           state.ItemContext != null &&
+           !SameWellItemContext(state.ItemContext, _itemContext);
+
+    private IEnumerable<Element> GetCachedRootNeighborhood(Element? root)
+    {
+        var result = new List<Element>();
+        if (root == null || root.Address == 0)
+            return result;
+
+        bool hasCachedRect = TryGetRect(root, out var cachedRect) && IsDrawableRect(cachedRect);
+        var seen = new HashSet<long>();
+        var parent = TryGetElementProperty(root, "Parent");
+
+        for (int depth = 0; depth < 2 && parent != null && parent.Address != 0; depth++)
+        {
+            IEnumerable<Element> children;
+            try { children = parent.Children; }
+            catch { break; }
+
+            foreach (var child in children)
+            {
+                if (child == null || child.Address == 0 || !seen.Add((long)child.Address))
+                    continue;
+
+                if (!IsPlausibleWellWindowCandidate(child))
+                    continue;
+
+                if (hasCachedRect && TryGetRect(child, out var childRect) && IsDrawableRect(childRect) && !IsSameOrOverlappingWellRect(cachedRect, childRect))
+                    continue;
+
+                result.Add(child);
+            }
+
+            parent = TryGetElementProperty(parent, "Parent");
+        }
+
+        return result;
+    }
+
+    private static bool IsSameOrOverlappingWellRect(RectangleF a, RectangleF b)
+    {
+        if (!IsDrawableRect(a) || !IsDrawableRect(b))
+            return true;
+
+        float dx = Math.Abs(a.X - b.X);
+        float dy = Math.Abs(a.Y - b.Y);
+        float dw = Math.Abs(a.Width - b.Width);
+        float dh = Math.Abs(a.Height - b.Height);
+        if (dx <= 80f && dy <= 80f && dw <= 120f && dh <= 120f)
+            return true;
+
+        float left = Math.Max(a.Left, b.Left);
+        float top = Math.Max(a.Top, b.Top);
+        float right = Math.Min(a.Right, b.Right);
+        float bottom = Math.Min(a.Bottom, b.Bottom);
+        float overlap = Math.Max(0f, right - left) * Math.Max(0f, bottom - top);
+        float smaller = Math.Min(Area(a), Area(b));
+        return smaller > 0f && overlap / smaller >= 0.65f;
+    }
+
+    private static bool IsVisibleWellAnchorState(WellState state)
+        => state.WindowVisible &&
+           (state.AwaitingRevealPrompt ||
+            state.Options.Count > 0 ||
+            state.RevealButtonVisible ||
+            state.ConfirmButtonVisible);
 
     private static bool HasCompleteOptions(WellState state)
         => state.Options.Count >= 3;
@@ -1025,8 +1603,10 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         if (state.ItemContext != null || state.Options.Count == 0)
             return state;
 
-        var context = BuildWellItemContext();
-        return context == null ? state : new WellState(state.Options, context, state.AwaitingRevealPrompt, state.WindowVisible);
+        if (_itemContext != null && DateTime.UtcNow <= _activeWellTransitionUntil)
+            return state with { ItemContext = _itemContext };
+
+        return state;
     }
 
     private WellState? TryReadLikelyWellState(out Element? matchedRoot)
@@ -1103,7 +1683,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         }
     }
 
-    private static WellState? TryReadWellStateFromRoot(Element? root)
+    private WellState? TryReadWellStateFromRoot(Element? root)
     {
         if (root == null ||
             !IsPlausibleWellWindowCandidate(root) ||
@@ -1112,13 +1692,19 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
         var context = BuildWellItemContext(root);
         var options = ReadOptionsFromFixedPaths(root);
-        if (options.Count < 3)
-            options = MergeOptions(options, SearchOptions(root));
 
+        bool revealButtonVisible = ElementSubtreeContainsExactVisibleText(root, ["Reveal"], 10, 320);
+        bool confirmButtonVisible = ElementSubtreeContainsExactVisibleText(root, ["Confirm"], 10, 320);
+        bool promptTextVisible = ElementSubtreeContainsText(root, ["Place an item with an Unrevealed Desecrated Modifier"], 8, 240);
+
+        // The instructional prompt text can remain in the subtree after options/Confirm are visible.
+        // Treat "awaiting reveal" as the specific button state, not merely the presence of the prompt text.
         bool awaitingRevealPrompt = options.Count == 0 &&
-            ElementSubtreeContainsText(root, ["Place an item with an Unrevealed Desecrated Modifier"], 8, 240);
+            promptTextVisible &&
+            revealButtonVisible &&
+            !confirmButtonVisible;
 
-        return new WellState(options, context, awaitingRevealPrompt, true);
+        return new WellState(options, context, awaitingRevealPrompt, true, revealButtonVisible, confirmButtonVisible, promptTextVisible);
     }
 
     private static ItemSnapshot? BuildWellItemContext(Element root)
@@ -1248,10 +1834,12 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         return true;
     }
 
-    private static List<WellOption> ReadOptionsFromFixedPaths(Element root)
+    private List<WellOption> ReadOptionsFromFixedPaths(Element root)
     {
         if (!ElementSubtreeContainsText(root, ["Confirm"], 8, 240))
             return [];
+
+        bool hasChoiceArea = TryGetChoiceTextFallbackArea(root, out var choiceArea, out _);
 
         int[][] optionPaths =
         [
@@ -1265,25 +1853,53 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         {
             var path = optionPaths[index];
             var container = FollowChildChain(root, path);
-            var textElement = FindFirstVisibleTextElementBfs(container);
+            if (container == null || !SafeVisible(container))
+                continue;
+
+            if (hasChoiceArea &&
+                TryGetRect(container, out var containerRect) &&
+                IsDrawableRect(containerRect) &&
+                !RectCenterInside(ExpandRect(choiceArea, 72f), containerRect))
+            {
+                continue;
+            }
+
+            var textElement = FindChoiceTextElement(container);
             if (textElement == null)
                 continue;
 
-            var textValues = ReadStringishProperties(textElement);
-            string text = textValues.TryGetValue("TextNoTags", out var noTags) ? noTags : string.Join(" ", textValues.Values);
-            string rawText = textValues.TryGetValue("Text", out var raw) ? raw : text;
-            if (!IsWellOptionText(text))
+            if (!TryGetRect(textElement, out var textRect) || !IsDrawableRect(textRect))
                 continue;
 
-            options.Add(new WellOption(
+            var (text, rawText) = ReadElementText(textElement);
+            if (!IsAcceptedWellChoiceText(text, textRect, choiceArea, hasChoiceArea))
+                continue;
+
+            if (hasChoiceArea && !ChoiceTextRectMatchesFixedPathSlot(index, textRect, choiceArea))
+                continue;
+
+            var option = new WellOption(
                 index + 1,
                 string.Join(",", path),
-                container ?? textElement,
+                container,
                 textElement,
                 NormalizeWhitespace(text),
                 NormalizeWhitespace(rawText),
-                textElement.GetClientRectCache));
+                textRect);
+            options.Add(option);
         }
+
+        if (options.Count < 3)
+            options = MergeOptions(options, ReadOptionsFromKnownOptionList(root));
+
+        if (options.Count < 3)
+            options = MergeOptions(options, SearchOptionsInChoiceArea(root, useScreenFallback: false));
+
+        if (options.Count < 3)
+            options = MergeOptions(options, SearchOptionsInChoiceTextStack(root));
+
+        if (options.Count < 3)
+            options = MergeOptions(options, SearchOptionsInChoiceArea(root, useScreenFallback: true));
 
         return options
             .OrderBy(option => option.Rect.Y)
@@ -1292,73 +1908,13 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             .ToList();
     }
 
-    private static List<WellOption> SearchOptions(Element root)
+    private static List<WellOption> MergeOptions(IReadOnlyList<WellOption> primary, IReadOnlyList<WellOption> fallback)
     {
-        if (!ElementSubtreeContainsText(root, ["Confirm"], 8, 240))
-            return [];
-
-        RectangleF rootRect;
-        try { rootRect = root.GetClientRectCache; }
-        catch { rootRect = default; }
-
-        var options = new List<WellOption>();
-        var seen = new HashSet<long>();
-        Search(root, "root", 0);
-
-        return options
-            .Where(option => IsLikelyChoiceCandidate(rootRect, option))
-            .OrderBy(option => option.Rect.Y)
-            .ThenBy(option => option.Rect.X)
-            .Take(3)
-            .Select((option, index) => option with { Index = index + 1 })
-            .ToList();
-
-        void Search(Element element, string path, int depth)
-        {
-            if (depth > 10 || options.Count >= 80)
-                return;
-
-            if (SafeVisible(element) && seen.Add((long)element.Address))
-            {
-                var textValues = ReadStringishProperties(element);
-                string text = textValues.TryGetValue("TextNoTags", out var noTags) ? noTags : string.Join(" ", textValues.Values);
-                if (IsWellOptionText(text))
-                {
-                    string rawText = textValues.TryGetValue("Text", out var raw) ? raw : text;
-                    options.Add(new WellOption(
-                        options.Count + 1,
-                        path,
-                        element,
-                        element,
-                        NormalizeWhitespace(text),
-                        NormalizeWhitespace(rawText),
-                        element.GetClientRectCache));
-                }
-            }
-
-            try
-            {
-                int childIndex = 0;
-                foreach (var child in element.Children)
-                {
-                    Search(child, $"{path}.children[{childIndex}]", depth + 1);
-                    childIndex++;
-                }
-            }
-            catch { }
-        }
-    }
-
-    private static List<WellOption> MergeOptions(IReadOnlyList<WellOption> primary, IReadOnlyList<WellOption> secondary)
-    {
-        var merged = new List<WellOption>();
-        var seenAddresses = new HashSet<long>();
-        var seenTexts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
+        var result = new List<WellOption>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         AddRange(primary);
-        AddRange(secondary);
-
-        return merged
+        AddRange(fallback);
+        return result
             .OrderBy(option => option.Rect.Y)
             .ThenBy(option => option.Rect.X)
             .Take(3)
@@ -1369,33 +1925,788 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         {
             foreach (var option in options)
             {
-                long textAddress = (long)option.TextElement.Address;
-                string textKey = NormalizeWhitespace(option.Text);
-                if (textAddress != 0 && !seenAddresses.Add(textAddress))
+                if (!IsWellRowOptionText(option.Text) || LooksLikeTooltipOrItemText(option.Text))
                     continue;
 
-                if (!seenTexts.Add(textKey))
-                    continue;
-
-                merged.Add(option);
+                string key = NormalizeWhitespace(option.Text);
+                if (seen.Add(key))
+                    result.Add(option);
             }
         }
     }
 
-    private static bool IsLikelyChoiceCandidate(RectangleF rootRect, WellOption option)
+    private List<WellOption> ReadOptionsFromKnownOptionList(Element root)
     {
-        if (!IsDrawableRect(option.Rect))
+        if (!TryGetChoiceTextFallbackArea(root, out var choiceArea, out _))
+            return [];
+
+        if (!TryGetRect(root, out var rootRect) || !IsDrawableRect(rootRect))
+            return [];
+
+        var optionList = FollowChildChain(root, [4, 0]);
+        if (optionList == null || !SafeVisible(optionList))
+            return [];
+
+        var matches = new List<ChoiceRowMatch>();
+        foreach (var candidate in CollectVisibleElementCandidates(optionList, maxDepth: 8, maxNodes: 1400))
+        {
+            if (!LooksLikeChoiceRowCandidate(rootRect, choiceArea, candidate.Rect))
+                continue;
+
+            if (!TryBuildChoiceRowMatch(candidate.Element, $"known-list:{candidate.Path}", candidate.Rect, choiceArea, out var match))
+                continue;
+
+            matches.Add(match);
+        }
+
+        return matches
+            .GroupBy(match => NormalizeWhitespace(match.Text), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group
+                .OrderBy(match => Math.Abs(CenterX(match.TextRect) - (choiceArea.Left + choiceArea.Width * 0.5f)))
+                .ThenBy(match => Area(match.RowRect))
+                .First())
+            .OrderBy(match => match.TextRect.Y)
+            .ThenBy(match => match.TextRect.X)
+            .Take(3)
+            .Select((match, index) => new WellOption(
+                index + 1,
+                match.Path,
+                match.RowElement,
+                match.TextElement,
+                match.Text,
+                match.RawText,
+                match.TextRect))
+            .ToList();
+    }
+
+    private bool TryBuildChoiceRowMatch(Element rowElement, string path, RectangleF rowRect, RectangleF choiceArea, out ChoiceRowMatch match)
+    {
+        match = null!;
+
+        var textElement = FindChoiceTextElementRelaxed(rowElement, rowRect);
+        if (textElement != null)
+        {
+            var (text, rawText) = ReadElementText(textElement);
+            if (TryGetRect(textElement, out var textRect) &&
+                IsDrawableRect(textRect) &&
+                IsAcceptedWellChoiceText(text, textRect, choiceArea, requireChoiceArea: true))
+            {
+                match = new ChoiceRowMatch(
+                    rowElement,
+                    textElement,
+                    path,
+                    NormalizeWhitespace(text),
+                    NormalizeWhitespace(rawText),
+                    rowRect,
+                    textRect);
+                return true;
+            }
+        }
+
+        if (TryReadMergedChoiceText(rowElement, rowRect, choiceArea, out var merged))
+        {
+            match = new ChoiceRowMatch(
+                rowElement,
+                merged.Element,
+                path + ":merged",
+                merged.Text,
+                merged.RawText,
+                rowRect,
+                merged.Rect);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryReadMergedChoiceText(Element rowElement, RectangleF rowRect, RectangleF choiceArea, out TextCandidate merged)
+    {
+        merged = null!;
+        if (!IsDrawableRect(rowRect))
             return false;
 
-        if (option.Path.Contains(".children[4].children[0].children[", StringComparison.Ordinal))
+        var expandedRow = ExpandRect(rowRect, 28f);
+        var fragments = CollectTextCandidates(rowElement, maxDepth: 18, maxNodes: 1200)
+            .Where(candidate => IsChoiceAreaCandidate(expandedRow, candidate.Rect))
+            .Where(candidate => IsChoiceAreaCandidate(ExpandRect(choiceArea, 24f), candidate.Rect))
+            .Where(candidate => IsPotentialChoiceTextFragment(candidate.Text))
+            .OrderBy(candidate => candidate.Rect.Y)
+            .ThenBy(candidate => candidate.Rect.X)
+            .ToList();
+
+        if (fragments.Count == 0)
+            return false;
+
+        var direct = fragments
+            .Where(candidate => IsAcceptedWellChoiceText(candidate.Text, candidate.Rect, choiceArea, requireChoiceArea: true))
+            .OrderByDescending(candidate => candidate.Text.Length)
+            .ThenByDescending(candidate => candidate.Rect.Width)
+            .FirstOrDefault();
+        if (direct != null)
+        {
+            merged = direct;
+            return true;
+        }
+
+        var pieces = new List<TextCandidate>();
+        foreach (var fragment in fragments)
+        {
+            string text = NormalizeWhitespace(fragment.Text);
+            if (string.IsNullOrWhiteSpace(text))
+                continue;
+
+            // Avoid doubling text when both a parent and its word/phrase children are exposed.
+            if (pieces.Any(existing => TextContains(existing.Text, text) && Area(existing.Rect) >= Area(fragment.Rect)))
+                continue;
+
+            pieces.RemoveAll(existing => TextContains(text, existing.Text) && Area(fragment.Rect) >= Area(existing.Rect));
+            pieces.Add(fragment with { Text = text, RawText = NormalizeWhitespace(fragment.RawText) });
+        }
+
+        pieces = pieces
+            .OrderBy(piece => piece.Rect.Y)
+            .ThenBy(piece => piece.Rect.X)
+            .Take(24)
+            .ToList();
+
+        if (pieces.Count == 0)
+            return false;
+
+        var rect = pieces.Select(piece => piece.Rect).Aggregate(UnionRect);
+        string combined = NormalizeWhitespace(string.Join(" ", pieces.Select(piece => piece.Text)));
+        if (!IsAcceptedWellChoiceText(combined, rect, choiceArea, requireChoiceArea: true))
+            return false;
+
+        var element = pieces.First().Element;
+        string raw = NormalizeWhitespace(string.Join(" ", pieces.Select(piece => string.IsNullOrWhiteSpace(piece.RawText) ? piece.Text : piece.RawText)));
+        merged = new TextCandidate(element, "merged-row-text", combined, raw, rect);
+        return true;
+    }
+
+    private static bool IsPotentialChoiceTextFragment(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        string normalized = NormalizeWhitespace(text);
+        if (normalized.Length < 1 || normalized.Length > 220)
+            return false;
+
+        if (LooksLikeTooltipOrItemText(normalized))
+            return false;
+
+        if (ContainsAnyText(normalized,
+            [
+                "Confirm", "Reveal", "Options", "Place an item", "Unrevealed Desecrated Modifier",
+                "The Well of Souls", "Heart of the Well", "Prefix", "Suffix", "Tier", "Current", "Best"
+            ]))
+            return false;
+
+        return normalized.Any(char.IsLetterOrDigit) ||
+               normalized.Contains('%') ||
+               normalized.StartsWith("+", StringComparison.Ordinal) ||
+               normalized.StartsWith("-", StringComparison.Ordinal);
+    }
+
+    private static bool TextContains(string haystack, string needle)
+    {
+        haystack = NormalizeWhitespace(haystack);
+        needle = NormalizeWhitespace(needle);
+        return needle.Length > 0 && haystack.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static RectangleF UnionRect(RectangleF a, RectangleF b)
+    {
+        float left = Math.Min(a.Left, b.Left);
+        float top = Math.Min(a.Top, b.Top);
+        float right = Math.Max(a.Right, b.Right);
+        float bottom = Math.Max(a.Bottom, b.Bottom);
+        return new RectangleF(left, top, right - left, bottom - top);
+    }
+
+    private List<WellOption> SearchOptionsInChoiceArea(Element root, bool useScreenFallback)
+    {
+        // The old screen-wide fallback could pick text from overlapping item tooltips.
+        // Keep normal recovery root-local and row/container-driven; broad screen text is diagnostics-only now.
+        if (useScreenFallback)
+            return [];
+
+        return ReadOptionsFromChoiceRows(root);
+    }
+
+    private List<WellOption> SearchOptionsInChoiceTextStack(Element root)
+    {
+        if (!TryGetChoiceTextFallbackArea(root, out var choiceArea, out _))
+            return [];
+
+        if (!TryGetRect(root, out var rootRect) || !IsDrawableRect(rootRect))
+            return [];
+
+        var candidates = CollectChoiceTextStackCandidates(root, choiceArea);
+        var rows = PickBestChoiceTextStack(candidates, choiceArea);
+
+        // Heart multi-reveal can leave the visible choice text in a sibling subtree
+        // while the Well title/Confirm button remain under the cached root. Recover
+        // by scanning only the same computed Well choice rectangle, never the whole
+        // screen as accepted option text.
+        if (rows.Count != 3 && CanUseScreenLocalChoiceFallback(root))
+        {
+            var screenCandidates = CollectChoiceTextStackScreenCandidates(choiceArea, rootRect);
+            rows = PickBestChoiceTextStack(screenCandidates, choiceArea);
+        }
+
+        if (rows.Count != 3)
+            return [];
+
+        return rows
+            .Select((candidate, index) => new WellOption(
+                index + 1,
+                $"text-fallback:{candidate.Path}",
+                candidate.Element,
+                candidate.Element,
+                candidate.Text,
+                candidate.RawText,
+                candidate.Rect))
+            .ToList();
+    }
+
+    private static bool CanUseScreenLocalChoiceFallback(Element root)
+        => ElementSubtreeContainsExactVisibleText(root, ["Confirm"], 10, 320) &&
+           !ElementSubtreeContainsExactVisibleText(root, ["Reveal"], 10, 320);
+
+    private bool TryGetChoiceTextFallbackArea(Element root, out RectangleF choiceArea, out string reason)
+    {
+        choiceArea = default;
+        reason = string.Empty;
+
+        if (!TryGetRect(root, out var rootRect) || !IsDrawableRect(rootRect))
+        {
+            reason = "bad root rect";
+            return false;
+        }
+
+        var confirmCandidates = CollectTextCandidates(root, maxDepth: 14, maxNodes: 1800)
+            .Where(candidate => IsExactText(candidate.Text, "Confirm"))
+            .ToList();
+
+        if (confirmCandidates.Count == 0)
+        {
+            reason = "no visible Confirm button";
+            return false;
+        }
+
+        float confirmTop = confirmCandidates.Min(candidate => candidate.Rect.Top);
+        float choiceTop = rootRect.Top + rootRect.Height * 0.42f;
+        float choiceBottom = confirmTop - 6f;
+        if (choiceBottom <= choiceTop + 24f)
+        {
+            reason = "choice area collapsed";
+            return false;
+        }
+
+        choiceArea = new RectangleF(
+            rootRect.Left + rootRect.Width * 0.04f,
+            choiceTop,
+            rootRect.Width * 0.88f,
+            choiceBottom - choiceTop);
+
+        return true;
+    }
+
+    private List<TextCandidate> CollectChoiceTextStackCandidates(Element root, RectangleF choiceArea)
+    {
+        if (!TryGetRect(root, out var rootRect) || !IsDrawableRect(rootRect))
+            return [];
+
+        return FilterChoiceTextStackCandidates(
+            CollectTextCandidates(root, maxDepth: 14, maxNodes: 3200),
+            choiceArea,
+            rootRect,
+            pathPrefix: string.Empty);
+    }
+
+    private List<TextCandidate> CollectChoiceTextStackScreenCandidates(RectangleF choiceArea, RectangleF rootRect)
+        => FilterChoiceTextStackCandidates(
+            CollectScreenTextCandidates(choiceArea),
+            choiceArea,
+            rootRect,
+            pathPrefix: "screen:");
+
+    private static List<TextCandidate> FilterChoiceTextStackCandidates(
+        IEnumerable<TextCandidate> source,
+        RectangleF choiceArea,
+        RectangleF rootRect,
+        string pathPrefix)
+    {
+        var candidates = new List<TextCandidate>();
+        foreach (var candidate in source)
+        {
+            if (!IsChoiceAreaCandidate(choiceArea, candidate.Rect))
+                continue;
+
+            if (!IsChoiceTextStackOptionText(candidate.Text))
+                continue;
+
+            if (LooksLikeTooltipOrItemText(candidate.Text))
+                continue;
+
+            if (candidate.Rect.Width < 120f || candidate.Rect.Width > rootRect.Width * 0.90f)
+                continue;
+
+            if (candidate.Rect.Height < 20f || candidate.Rect.Height > 145f)
+                continue;
+
+            candidates.Add(string.IsNullOrEmpty(pathPrefix)
+                ? candidate
+                : candidate with { Path = pathPrefix + candidate.Path });
+        }
+
+        return candidates
+            .GroupBy(candidate => NormalizeWhitespace(candidate.Text), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderBy(candidate => candidate.Rect.Width * candidate.Rect.Height).First())
+            .ToList();
+    }
+
+    private static List<TextCandidate> PickBestChoiceTextStack(IReadOnlyList<TextCandidate> candidates, RectangleF choiceArea)
+    {
+        if (candidates.Count < 3)
+            return [];
+
+        var ordered = candidates
+            .OrderBy(candidate => candidate.Rect.Y)
+            .ThenBy(candidate => candidate.Rect.X)
+            .Take(18)
+            .ToList();
+
+        List<TextCandidate>? best = null;
+        float bestScore = float.MaxValue;
+
+        for (int i = 0; i < ordered.Count - 2; i++)
+        {
+            for (int j = i + 1; j < ordered.Count - 1; j++)
+            {
+                for (int k = j + 1; k < ordered.Count; k++)
+                {
+                    var trio = new List<TextCandidate> { ordered[i], ordered[j], ordered[k] };
+                    if (!ChoiceTextRowsLookStacked(trio, choiceArea))
+                        continue;
+
+                    float c0 = CenterY(trio[0].Rect);
+                    float c1 = CenterY(trio[1].Rect);
+                    float c2 = CenterY(trio[2].Rect);
+                    float d1 = c1 - c0;
+                    float d2 = c2 - c1;
+                    float centerSpread = trio.Max(candidate => CenterX(candidate.Rect)) - trio.Min(candidate => CenterX(candidate.Rect));
+                    float score = Math.Abs(d1 - d2) * 2f +
+                                  centerSpread +
+                                  Math.Abs((d1 + d2) * 0.5f - choiceArea.Height * 0.28f) +
+                                  Math.Abs(CenterX(trio[1].Rect) - (choiceArea.Left + choiceArea.Width * 0.5f)) * 0.25f;
+
+                    if (score < bestScore)
+                    {
+                        best = trio;
+                        bestScore = score;
+                    }
+                }
+            }
+        }
+
+        return best ?? [];
+    }
+
+    private static bool ChoiceTextRowsLookStacked(IReadOnlyList<TextCandidate> rows, RectangleF choiceArea)
+    {
+        if (rows.Count != 3)
+            return false;
+
+        float c0 = CenterY(rows[0].Rect);
+        float c1 = CenterY(rows[1].Rect);
+        float c2 = CenterY(rows[2].Rect);
+        float d1 = c1 - c0;
+        float d2 = c2 - c1;
+
+        if (d1 < 45f || d2 < 45f || d1 > choiceArea.Height * 0.55f || d2 > choiceArea.Height * 0.55f)
+            return false;
+
+        float centerSpread = rows.Max(row => CenterX(row.Rect)) - rows.Min(row => CenterX(row.Rect));
+        if (centerSpread > choiceArea.Width * 0.35f)
+            return false;
+
+        return true;
+    }
+
+    private static bool ChoiceTextRectMatchesFixedPathSlot(int zeroBasedIndex, RectangleF textRect, RectangleF choiceArea)
+    {
+        if (!IsDrawableRect(textRect) || !IsDrawableRect(choiceArea) || choiceArea.Height <= 1f)
             return true;
 
-        if (!IsDrawableRect(rootRect))
+        float normalizedCenterY = (CenterY(textRect) - choiceArea.Top) / choiceArea.Height;
+        return zeroBasedIndex switch
+        {
+            0 => normalizedCenterY >= 0.18f && normalizedCenterY <= 0.48f,
+            1 => normalizedCenterY >= 0.42f && normalizedCenterY <= 0.73f,
+            2 => normalizedCenterY >= 0.64f && normalizedCenterY <= 0.98f,
+            _ => true
+        };
+    }
+
+    private static float CenterX(RectangleF rect)
+        => rect.X + rect.Width * 0.5f;
+
+    private static float CenterY(RectangleF rect)
+        => rect.Y + rect.Height * 0.5f;
+
+    private static bool LooksLikeTooltipOrItemText(string text)
+    {
+        string normalized = NormalizeWhitespace(text);
+        if (normalized.Equals("Heart of the Well Diamond", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("Heart of the Well", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("Diamond", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("Jewel", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return ContainsAnyText(normalized,
+        [
+            "Heart of the Well",
+            "Limited to:",
+            "Limited to",
+            "Item Level",
+            "Requires Level",
+            "Quality:",
+            "Countless souls",
+            "Place into",
+            "Right click",
+            "Take this item",
+            "Desecrated Modifier",
+            "Unrevealed Desecrated Modifier",
+            "The Well of Souls"
+        ]);
+    }
+
+    private List<WellOption> ReadOptionsFromChoiceRows(Element root)
+    {
+        if (!TryGetRect(root, out var rootRect) || !IsDrawableRect(rootRect))
+            return [];
+
+        var rootTextCandidates = CollectTextCandidates(root, maxDepth: 14, maxNodes: 1600);
+        var confirmCandidates = rootTextCandidates
+            .Where(candidate => ContainsAnyText(candidate.Text, ["Confirm"]))
+            .ToList();
+        if (confirmCandidates.Count == 0)
+            return [];
+
+        float confirmTop = confirmCandidates.Min(candidate => candidate.Rect.Top);
+        float choiceTop = rootRect.Top + rootRect.Height * 0.25f;
+        float choiceBottom = confirmTop - 6f;
+        if (choiceBottom <= choiceTop + 24f)
+            return [];
+
+        var choiceArea = new RectangleF(
+            rootRect.Left + rootRect.Width * 0.02f,
+            choiceTop,
+            rootRect.Width * 0.96f,
+            choiceBottom - choiceTop);
+
+        var rowMatches = new List<ChoiceRowMatch>();
+        foreach (var rowCandidate in CollectVisibleElementCandidates(root, maxDepth: 14, maxNodes: 1600))
+        {
+            if (!LooksLikeChoiceRowCandidate(rootRect, choiceArea, rowCandidate.Rect))
+                continue;
+
+            if (!TryBuildChoiceRowMatch(rowCandidate.Element, rowCandidate.Path, rowCandidate.Rect, choiceArea, out var match))
+                continue;
+
+            rowMatches.Add(match);
+        }
+
+        var uniqueRows = rowMatches
+            .GroupBy(match => (long)match.TextElement.Address)
+            .Select(group => group
+                .OrderBy(match => ChoiceRowContainerScore(match, rootRect))
+                .First())
+            .OrderByDescending(match => match.RowRect.Y)
+            .Take(3)
+            .OrderBy(match => match.RowRect.Y)
+            .ToList();
+
+        if (uniqueRows.Count != 3 || !ChoiceRowsLookStacked(uniqueRows, rootRect))
+            return [];
+
+        return uniqueRows
+            .Select((match, index) => new WellOption(
+                index + 1,
+                $"row-fallback:{match.Path}",
+                match.RowElement,
+                match.TextElement,
+                match.Text,
+                match.RawText,
+                match.RowRect))
+            .ToList();
+    }
+
+    private static bool LooksLikeChoiceRowCandidate(RectangleF rootRect, RectangleF choiceArea, RectangleF rowRect)
+    {
+        if (!IsDrawableRect(rowRect))
             return false;
 
-        float choiceAreaTop = rootRect.Y + rootRect.Height * 0.50f;
-        float choiceAreaRight = rootRect.X + rootRect.Width * 0.78f;
-        return option.Rect.Y >= choiceAreaTop && option.Rect.X <= choiceAreaRight;
+        if (!RectCenterInside(choiceArea, rowRect))
+            return false;
+
+        if (rowRect.Width < rootRect.Width * 0.35f)
+            return false;
+
+        if (rowRect.Height < 26f || rowRect.Height > Math.Max(220f, rootRect.Height * 0.28f))
+            return false;
+
+        if (rowRect.Width > rootRect.Width * 0.98f && rowRect.Height > choiceArea.Height * 0.75f)
+            return false;
+
+        return true;
+    }
+
+    private static float ChoiceRowContainerScore(ChoiceRowMatch match, RectangleF rootRect)
+    {
+        float desiredWidth = rootRect.Width * 0.62f;
+        float desiredHeight = Math.Clamp(rootRect.Height * 0.07f, 42f, 100f);
+        return Math.Abs(match.RowRect.Width - desiredWidth) +
+               Math.Abs(match.RowRect.Height - desiredHeight) * 2f +
+               Area(match.RowRect) * 0.0001f;
+    }
+
+    private static bool ChoiceRowsLookStacked(IReadOnlyList<ChoiceRowMatch> rows, RectangleF rootRect)
+    {
+        if (rows.Count != 3)
+            return false;
+
+        for (int i = 1; i < rows.Count; i++)
+        {
+            float previousCenter = rows[i - 1].RowRect.Y + rows[i - 1].RowRect.Height * 0.5f;
+            float currentCenter = rows[i].RowRect.Y + rows[i].RowRect.Height * 0.5f;
+            if (currentCenter - previousCenter < 20f)
+                return false;
+        }
+
+        float minCenterX = rows.Min(row => row.RowRect.X + row.RowRect.Width * 0.5f);
+        float maxCenterX = rows.Max(row => row.RowRect.X + row.RowRect.Width * 0.5f);
+        return maxCenterX - minCenterX <= rootRect.Width * 0.35f;
+    }
+
+    private List<TextCandidate> CollectScreenTextCandidates(RectangleF choiceArea)
+    {
+        var result = new List<TextCandidate>();
+        var seen = new HashSet<long>();
+        var ingameUi = GameController.Game.IngameState.IngameUi;
+
+        AddCandidates(ingameUi);
+        AddCandidates(ingameUi.Parent);
+
+        return result;
+
+        void AddCandidates(Element? root)
+        {
+            if (root == null || root.Address == 0)
+                return;
+
+            foreach (var candidate in CollectTextCandidates(root, maxDepth: 14, maxNodes: 6000))
+            {
+                if (!IsChoiceAreaCandidate(choiceArea, candidate.Rect))
+                    continue;
+
+                if (seen.Add((long)candidate.Element.Address))
+                    result.Add(candidate);
+            }
+        }
+    }
+
+    private static bool IsChoiceAreaCandidate(RectangleF choiceArea, RectangleF rect)
+    {
+        if (!IsDrawableRect(rect))
+            return false;
+
+        float centerX = rect.X + rect.Width * 0.5f;
+        float centerY = rect.Y + rect.Height * 0.5f;
+        return centerX >= choiceArea.Left &&
+               centerX <= choiceArea.Right &&
+               centerY >= choiceArea.Top &&
+               centerY <= choiceArea.Bottom;
+    }
+
+    private static List<ElementCandidate> CollectVisibleElementCandidates(Element root, int maxDepth, int maxNodes)
+    {
+        var result = new List<ElementCandidate>();
+        int scanned = 0;
+        Collect(root, "root", 0);
+        return result;
+
+        void Collect(Element element, string path, int depth)
+        {
+            if (depth > maxDepth || scanned++ >= maxNodes)
+                return;
+
+            if (SafeVisible(element) && TryGetRect(element, out var rect) && IsDrawableRect(rect))
+                result.Add(new ElementCandidate(element, path, rect));
+
+            if (depth == maxDepth)
+                return;
+
+            try
+            {
+                int index = 0;
+                foreach (var child in element.Children)
+                {
+                    Collect(child, $"{path}.children[{index}]", depth + 1);
+                    if (scanned >= maxNodes)
+                        return;
+
+                    index++;
+                }
+            }
+            catch { }
+        }
+    }
+
+    private static List<TextCandidate> CollectTextCandidates(Element root, int maxDepth, int maxNodes)
+    {
+        var result = new List<TextCandidate>();
+        int scanned = 0;
+        Collect(root, "root", 0);
+        return result;
+
+        void Collect(Element element, string path, int depth)
+        {
+            if (depth > maxDepth || scanned++ >= maxNodes)
+                return;
+
+            if (SafeVisible(element) && TryGetRect(element, out var rect) && IsDrawableRect(rect))
+            {
+                var strings = ReadStringishProperties(element);
+                string text = strings.TryGetValue("TextNoTags", out var noTags) ? noTags : string.Join(" ", strings.Values);
+                string rawText = strings.TryGetValue("Text", out var raw) ? raw : text;
+                text = NormalizeWhitespace(text);
+                if (!string.IsNullOrWhiteSpace(text))
+                    result.Add(new TextCandidate(element, path, text, NormalizeWhitespace(rawText), rect));
+            }
+
+            if (depth == maxDepth)
+                return;
+
+            try
+            {
+                int index = 0;
+                foreach (var child in element.Children)
+                {
+                    Collect(child, $"{path}.children[{index}]", depth + 1);
+                    if (scanned >= maxNodes)
+                        return;
+
+                    index++;
+                }
+            }
+            catch { }
+        }
+    }
+
+    private static Element? FindChoiceTextElement(Element slot)
+    {
+        TryGetRect(slot, out var slotRect);
+        return FindChoiceTextElementRelaxed(slot, slotRect);
+    }
+
+    private static Element? FindChoiceTextElementRelaxed(Element slot, RectangleF slotRect)
+    {
+        var queue = new Queue<Element>();
+        queue.Enqueue(slot);
+        int visited = 0;
+        while (queue.Count > 0 && visited++ < 160)
+        {
+            var current = queue.Dequeue();
+            if (SafeVisible(current))
+            {
+                var (text, _) = ReadElementText(current);
+                if (IsWellRowOptionText(text))
+                {
+                    if (!IsDrawableRect(slotRect))
+                        return current;
+
+                    TryGetRect(current, out var textRect);
+                    if (IsDrawableRect(textRect) && RectCenterInside(ExpandRect(slotRect, 16f), textRect))
+                        return current;
+                }
+            }
+
+            try
+            {
+                foreach (var child in current.Children)
+                    queue.Enqueue(child);
+            }
+            catch { }
+        }
+
+        return null;
+    }
+
+    private static Element? FindChoiceTextElementIncludingNonVisibleText(Element slot)
+    {
+        TryGetRect(slot, out var slotRect);
+        var queue = new Queue<Element>();
+        queue.Enqueue(slot);
+        int visited = 0;
+        while (queue.Count > 0 && visited++ < 220)
+        {
+            var current = queue.Dequeue();
+            if (TryGetRect(current, out var textRect) && IsDrawableRect(textRect))
+            {
+                var (text, _) = ReadElementText(current);
+                if (IsWellRowOptionText(text) &&
+                    (!IsDrawableRect(slotRect) || RectCenterInside(ExpandRect(slotRect, 24f), textRect)))
+                {
+                    return current;
+                }
+            }
+
+            try
+            {
+                foreach (var child in current.Children)
+                    queue.Enqueue(child);
+            }
+            catch { }
+        }
+
+        return null;
+    }
+
+    private static (string Text, string RawText) ReadElementText(Element element)
+    {
+        var strings = ReadStringishProperties(element);
+        string text = strings.TryGetValue("TextNoTags", out var noTags) ? noTags : string.Join(" ", strings.Values);
+        string rawText = strings.TryGetValue("Text", out var raw) ? raw : text;
+        return (NormalizeWhitespace(text), NormalizeWhitespace(rawText));
+    }
+
+    private static RectangleF ExpandRect(RectangleF rect, float amount)
+        => new(rect.X - amount, rect.Y - amount, rect.Width + amount * 2f, rect.Height + amount * 2f);
+
+    private static bool RectCenterInside(RectangleF outer, RectangleF inner)
+    {
+        float x = inner.X + inner.Width * 0.5f;
+        float y = inner.Y + inner.Height * 0.5f;
+        return x >= outer.Left && x <= outer.Right && y >= outer.Top && y <= outer.Bottom;
+    }
+
+    private static bool TryGetRect(Element element, out RectangleF rect)
+    {
+        try
+        {
+            rect = element.GetClientRectCache;
+            return true;
+        }
+        catch
+        {
+            rect = default;
+            return false;
+        }
     }
 
     private List<ElementSearchHit> FindWellElements(int maxDepth, int maxHits)
@@ -1604,6 +2915,35 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         }
     }
 
+    private static bool ElementSubtreeContainsExactVisibleText(Element root, IReadOnlyList<string> needles, int maxDepth, int maxNodes)
+    {
+        int scanned = 0;
+        return Search(root, 0);
+
+        bool Search(Element element, int depth)
+        {
+            if (depth > maxDepth || scanned++ >= maxNodes || !SafeVisible(element))
+                return false;
+
+            var (text, _) = ReadElementText(element);
+            if (!string.IsNullOrWhiteSpace(text) && needles.Any(needle => IsExactText(text, needle)))
+                return true;
+
+            try
+            {
+                foreach (var child in element.Children)
+                    if (Search(child, depth + 1))
+                        return true;
+            }
+            catch { }
+
+            return false;
+        }
+    }
+
+    private static bool IsExactText(string? text, string expected)
+        => NormalizeWhitespace(text ?? string.Empty).Equals(NormalizeWhitespace(expected), StringComparison.OrdinalIgnoreCase);
+
     private static bool IsPlausibleWellWindowCandidate(Element element)
     {
         if (!SafeVisible(element))
@@ -1623,42 +2963,6 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             return false;
 
         return true;
-    }
-
-    private static Element? FindFirstVisibleTextElementBfs(Element? element)
-    {
-        if (element == null)
-            return null;
-
-        try
-        {
-            if (!SafeVisible(element))
-                return null;
-
-            var queue = new Queue<Element>();
-            queue.Enqueue(element);
-
-            while (queue.Count > 0)
-            {
-                var current = queue.Dequeue();
-                if (!SafeVisible(current))
-                    continue;
-
-                var strings = ReadStringishProperties(current);
-                if (strings.Values.Any(value => !string.IsNullOrWhiteSpace(value)))
-                    return current;
-
-                try
-                {
-                    foreach (var child in current.Children)
-                        queue.Enqueue(child);
-                }
-                catch { }
-            }
-        }
-        catch { }
-
-        return null;
     }
 
     private static Element? FollowChildChain(Element? start, IReadOnlyList<int> chain)
@@ -1715,29 +3019,111 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string[] interesting = ["Text", "TextNoTags", "TooltipText", "Name", "Label", "DisplayName", "DebugName"];
+        var type = obj.GetType();
         foreach (var name in interesting)
         {
             try
             {
-                var prop = obj.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                if (prop == null || prop.GetIndexParameters().Length != 0)
-                    continue;
-                var value = prop.GetValue(obj);
-                if (value == null)
-                    continue;
-                if (value is string s && !string.IsNullOrWhiteSpace(s))
-                    result[name] = s.Length <= 200 ? s : s[..200];
-                else if (value is not IEnumerable)
-                {
-                    string raw = value.ToString() ?? string.Empty;
-                    if (!string.IsNullOrWhiteSpace(raw) && raw.Length <= 200)
-                        result[name] = raw;
-                }
+                var prop = type.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (prop != null && prop.GetIndexParameters().Length == 0)
+                    AddStringish(result, name, prop.GetValue(obj));
+            }
+            catch { }
+
+            try
+            {
+                var field = type.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (field != null)
+                    AddStringish(result, name + "Field", field.GetValue(obj));
+            }
+            catch { }
+        }
+
+        foreach (string methodName in new[] { "GetText", "GetTextNoTags", "GetTooltipText" })
+        {
+            try
+            {
+                var method = type.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                if (method != null && method.ReturnType != typeof(void))
+                    AddStringish(result, methodName, method.Invoke(obj, null));
             }
             catch { }
         }
 
         return result;
+    }
+
+    private static void AddStringish(Dictionary<string, string> result, string name, object? value)
+    {
+        if (value == null)
+            return;
+
+        if (value is string s)
+        {
+            AddString(result, name, s);
+            return;
+        }
+
+        if (value is IEnumerable enumerable)
+        {
+            var parts = new List<string>();
+            int count = 0;
+            foreach (var item in enumerable)
+            {
+                if (count++ >= 24)
+                    break;
+
+                if (item == null)
+                    continue;
+
+                if (item is string itemString)
+                {
+                    if (!string.IsNullOrWhiteSpace(itemString))
+                        parts.Add(itemString);
+                }
+                else if (item.GetType().IsPrimitive || item is decimal)
+                {
+                    parts.Add(item.ToString() ?? string.Empty);
+                }
+                else
+                {
+                    string raw = item.ToString() ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(raw) && raw.Length <= 80 && !LooksLikeTypeName(raw))
+                        parts.Add(raw);
+                }
+            }
+
+            AddString(result, name, string.Join(" ", parts));
+            return;
+        }
+
+        string text = value.ToString() ?? string.Empty;
+        if (!LooksLikeTypeName(text))
+            AddString(result, name, text);
+    }
+
+    private static void AddString(Dictionary<string, string> result, string name, string value)
+    {
+        string normalized = NormalizeWhitespace(value);
+        if (string.IsNullOrWhiteSpace(normalized))
+            return;
+
+        if (normalized.Length > 320)
+            normalized = normalized[..320];
+
+        if (!result.TryGetValue(name, out var existing) || normalized.Length > existing.Length)
+            result[name] = normalized;
+    }
+
+    private static bool LooksLikeTypeName(string value)
+    {
+        string normalized = NormalizeWhitespace(value);
+        if (string.IsNullOrWhiteSpace(normalized))
+            return true;
+
+        return !normalized.Contains(' ') &&
+               normalized.Count(ch => ch == '.') >= 2 &&
+               normalized.All(ch => char.IsLetterOrDigit(ch) || ch is '.' or '_' or '`' or '[' or ']');
     }
 
     private static IEnumerable<string> SplitVisibleTextLines(string value)
@@ -1756,6 +3142,12 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             return false;
 
         if (line.Any(char.IsDigit) || line.Contains(':') || line.Contains('+') || line.Contains('%'))
+            return false;
+
+        if (line.Contains(',') || line.Contains('.') || line.Contains(';'))
+            return false;
+
+        if (line.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > 6)
             return false;
 
         if (WellKnownItemClasses.Any(known => line.Equals(known, StringComparison.OrdinalIgnoreCase) ||
@@ -1848,18 +3240,69 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         return "";
     }
 
-    private static bool IsWellOptionText(string? text)
+    private static bool IsAcceptedWellChoiceText(string? text, RectangleF textRect, RectangleF choiceArea, bool requireChoiceArea)
+    {
+        if (!IsWellRowOptionText(text))
+            return false;
+
+        if (LooksLikeTooltipOrItemText(text ?? string.Empty))
+            return false;
+
+        if (requireChoiceArea && !IsChoiceAreaCandidate(ExpandRect(choiceArea, 24f), textRect))
+            return false;
+
+        return true;
+    }
+
+    private static string ExplainRejectedChoiceText(string? text, RectangleF textRect, RectangleF choiceArea, bool requireChoiceArea, bool hasTextRect)
+    {
+        if (!hasTextRect)
+            return "no-text-rect";
+        if (!IsWellRowOptionText(text))
+            return "not-option-text";
+        if (LooksLikeTooltipOrItemText(text ?? string.Empty))
+            return "tooltip-or-item-text";
+        if (requireChoiceArea && !IsChoiceAreaCandidate(ExpandRect(choiceArea, 24f), textRect))
+            return "outside-choice-area";
+        return "unknown";
+    }
+
+    private static bool IsWellRowOptionText(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
         string normalized = NormalizeWhitespace(text);
-        if (normalized.Length < 3 || normalized.Length > 180)
+        if (normalized.Length < 3 || normalized.Length > 220)
             return false;
 
-        if (ContainsAnyText(normalized, ["The Well of Souls", "Confirm", "Reveal", "Options", "Desecrated Modifier", "Take this item"]))
+        if (LooksLikeTooltipOrItemText(normalized))
             return false;
 
+        return !ContainsAnyText(normalized,
+        [
+            "The Well of Souls", "Heart of the Well", "Confirm", "Reveal", "Options",
+            "Desecrated Modifier", "Take this item", "Place an item", "Place into",
+            "Right click", "Unrevealed Desecrated Modifier", "Item Level", "Requires Level",
+            "Limited to:", "Countless souls", "Quality:"
+        ]);
+    }
+
+    private static bool IsChoiceTextStackOptionText(string? text)
+    {
+        if (!IsWellRowOptionText(text))
+            return false;
+
+        string normalized = NormalizeWhitespace(text);
+        return normalized.Any(char.IsDigit);
+    }
+
+    private static bool IsStrictScreenOptionText(string? text)
+    {
+        if (!IsWellRowOptionText(text))
+            return false;
+
+        string normalized = NormalizeWhitespace(text);
         if (!normalized.Any(char.IsDigit))
             return false;
 
@@ -1869,6 +3312,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
                normalized.Contains(" per second", StringComparison.OrdinalIgnoreCase) ||
                normalized.Contains(" to ", StringComparison.OrdinalIgnoreCase) ||
                normalized.Contains(" Mana", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains(" Rage", StringComparison.OrdinalIgnoreCase) ||
                normalized.Contains(" enemy killed", StringComparison.OrdinalIgnoreCase) ||
                normalized.Contains(" Magnitude", StringComparison.OrdinalIgnoreCase) ||
                normalized.Contains(" Ailments", StringComparison.OrdinalIgnoreCase) ||
@@ -1879,6 +3323,9 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
                normalized.Contains(" Dexterity", StringComparison.OrdinalIgnoreCase) ||
                normalized.Contains(" Intelligence", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool IsWellOptionText(string? text)
+        => IsStrictScreenOptionText(text);
 
     private static RectangleF PickTierBadgeRect(RectangleF optionRect, float width, float height)
     {
