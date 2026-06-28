@@ -882,20 +882,58 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         {
             var mod = ReadDiagnosticProperty(option, "Mod");
             report.AppendLine($"  Mod: {(mod == null ? "null" : "present")}");
-            if (mod == null)
-                return;
-
-            AppendSafeReportValue(report, "  ", "Mod.Key", () => ReadDiagnosticProperty(mod, "Key"));
-            AppendSafeReportValue(report, "  ", "Mod.UserFriendlyName", () => ReadDiagnosticProperty(mod, "UserFriendlyName"));
-            AppendSafeReportValue(report, "  ", "Mod.Tier", () => ReadDiagnosticProperty(mod, "Tier"));
-            AppendSafeReportValue(report, "  ", "Mod.AffixType", () => ReadDiagnosticProperty(mod, "AffixType"));
-            AppendSafeReportValue(report, "  ", "Mod.MinLevel", () => ReadDiagnosticProperty(mod, "MinLevel"));
-            AppendSafeReportValue(report, "  ", "Mod.StatNames", () => ReadDiagnosticProperty(mod, "StatNames"));
-            AppendSafeReportValue(report, "  ", "Mod.StatRange", () => ReadDiagnosticProperty(mod, "StatRange"));
+            if (mod != null)
+            {
+                AppendSafeReportValue(report, "  ", "Mod.Key", () => ReadDiagnosticProperty(mod, "Key"));
+                AppendSafeReportValue(report, "  ", "Mod.UserFriendlyName", () => ReadDiagnosticProperty(mod, "UserFriendlyName"));
+                AppendSafeReportValue(report, "  ", "Mod.Tier", () => ReadDiagnosticProperty(mod, "Tier"));
+                AppendSafeReportValue(report, "  ", "Mod.AffixType", () => ReadDiagnosticProperty(mod, "AffixType"));
+                AppendSafeReportValue(report, "  ", "Mod.MinLevel", () => ReadDiagnosticProperty(mod, "MinLevel"));
+                AppendSafeReportValue(report, "  ", "Mod.StatNames", () => ReadDiagnosticProperty(mod, "StatNames"));
+                AppendSafeReportValue(report, "  ", "Mod.StatRange", () => ReadDiagnosticProperty(mod, "StatRange"));
+            }
         }
         catch (Exception ex)
         {
             report.AppendLine($"  Mod: failed: {ex.Message}");
+        }
+
+        try
+        {
+            var modInstance = ReadDiagnosticProperty(option, "ModInstance");
+            report.AppendLine($"  ModInstance: {(modInstance == null ? "null" : "present")}");
+            if (modInstance == null)
+                return;
+
+            report.AppendLine($"  ModInstanceRuntimeType: {modInstance.GetType().FullName}");
+            AppendSafeReportValue(report, "  ", "ModInstance.RawName", () => ReadDiagnosticProperty(modInstance, "RawName"));
+            AppendSafeReportValue(report, "  ", "ModInstance.Name", () => ReadDiagnosticProperty(modInstance, "Name"));
+            AppendSafeReportValue(report, "  ", "ModInstance.DisplayName", () => ReadDiagnosticProperty(modInstance, "DisplayName"));
+            AppendSafeReportValue(report, "  ", "ModInstance.Translation", () => ReadDiagnosticProperty(modInstance, "Translation"));
+            AppendSafeReportValue(report, "  ", "ModInstance.Values", () => ReadDiagnosticProperty(modInstance, "Values"));
+            AppendSafeReportValue(report, "  ", "ModInstance.ValuesMinMax", () => ReadDiagnosticProperty(modInstance, "ValuesMinMax"));
+
+            object? modRecord = null;
+            try
+            {
+                modRecord = ReadDiagnosticProperty(modInstance, "ModRecord");
+                report.AppendLine($"  ModInstance.ModRecord: {(modRecord == null ? "null" : "present")}");
+            }
+            catch (Exception ex)
+            {
+                report.AppendLine($"  ModInstance.ModRecord: failed: {ex.Message}");
+            }
+
+            if (modRecord != null)
+            {
+                AppendSafeReportValue(report, "  ", "ModInstance.ModRecord.Key", () => ReadDiagnosticProperty(modRecord, "Key"));
+                AppendSafeReportValue(report, "  ", "ModInstance.ModRecord.StatNames", () => ReadDiagnosticProperty(modRecord, "StatNames"));
+                AppendSafeReportValue(report, "  ", "ModInstance.ModRecord.StatRange", () => ReadDiagnosticProperty(modRecord, "StatRange"));
+            }
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"  ModInstance: failed: {ex.Message}");
         }
     }
 
