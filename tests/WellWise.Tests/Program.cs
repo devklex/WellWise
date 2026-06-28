@@ -16,6 +16,10 @@ var tests = new (string Name, Action Body)[]
     ("staff block chance legacy range remains recognized", StaffBlockChanceLegacyRange),
     ("staff Puppet Master stacks resolves", StaffPuppetMasterStacksResolves),
     ("staff Puppet Master stacks stays class-specific", StaffPuppetMasterStacksStaysClassSpecific),
+    ("staff Puppet Master mod key resolves", StaffPuppetMasterModKeyResolves),
+    ("staff Puppet Master mod key stays class-specific", StaffPuppetMasterModKeyStaysClassSpecific),
+    ("typed mod key requires item context", TypedModKeyRequiresItemContext),
+    ("unknown typed mod key stays unknown", UnknownTypedModKeyStaysUnknown),
     ("otherworldly ring mana before life resolves", OtherworldlyRingDamageTakenFromManaBeforeLife),
     ("otherworldly amulet scaled critical chance uses display range", OtherworldlyAmuletFireSpellCriticalChance),
     ("otherworldly belt no-number stat resolves without fake range", OtherworldlyBeltMeleeSplash),
@@ -171,6 +175,35 @@ static void StaffPuppetMasterStacksStaysClassSpecific()
 {
     var result = CreateResolver().Resolve(Item("Ring", 80), "+3 maximum stacks of Puppet Master");
     AssertFalse(result.Known, "Staff-only Puppet Master stacks rule should not resolve for a ring");
+}
+
+static void StaffPuppetMasterModKeyResolves()
+{
+    var result = CreateResolver().ResolveByModKey(Item("Staff", 80), "AbyssModStaffKurgalSuffixPuppetMasterStacks");
+    AssertKnownWithoutTier(result);
+    AssertEqual("repoe_desecrated_AbyssModStaffKurgalSuffixPuppetMasterStacks", result.RuleId, "staff Puppet Master typed mod key rule id");
+    AssertEqualIgnoreCase("suffix", result.AffixType, "staff Puppet Master typed mod key affix type");
+    AssertEqual(1, result.BestTier?.Tier, "staff Puppet Master typed mod key best tier");
+    AssertEqual(3d, result.BestTier?.Min, "staff Puppet Master typed mod key minimum");
+    AssertEqual(4d, result.BestTier?.Max, "staff Puppet Master typed mod key maximum");
+}
+
+static void StaffPuppetMasterModKeyStaysClassSpecific()
+{
+    var result = CreateResolver().ResolveByModKey(Item("Ring", 80), "AbyssModStaffKurgalSuffixPuppetMasterStacks");
+    AssertFalse(result.Known, "Staff-only typed mod key should not resolve for a ring");
+}
+
+static void TypedModKeyRequiresItemContext()
+{
+    var result = CreateResolver().ResolveByModKey(null, "AbyssModStaffKurgalSuffixPuppetMasterStacks");
+    AssertFalse(result.Known, "typed mod key should not resolve without item context");
+}
+
+static void UnknownTypedModKeyStaysUnknown()
+{
+    var result = CreateResolver().ResolveByModKey(Item("Staff", 80), "UniqueKulemakHisWinnowingFlame_1");
+    AssertFalse(result.Known, "unknown typed mod key should fail closed");
 }
 
 static void OtherworldlyRingDamageTakenFromManaBeforeLife()

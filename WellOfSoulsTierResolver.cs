@@ -82,7 +82,38 @@ public sealed class WellOfSoulsTierResolver
             return WellOfSoulsTierResult.Unknown(text, value, "no local tier rule");
 
         values = ExtractValuesForRule(rule, text);
-        value = values.Count > 0 ? values[0] : null;
+        return BuildKnownResult(rule, item, text, values, fallbackItemLevel);
+    }
+
+    public WellOfSoulsTierResult ResolveByModKey(ItemSnapshot? item, string? modKey, string optionText = "", int fallbackItemLevel = 0)
+    {
+        string text = Normalize(optionText);
+        double? value = null;
+
+        if (!HasItemContext(item))
+            return WellOfSoulsTierResult.Unknown(text, value, "missing Well item class context");
+
+        if (string.IsNullOrWhiteSpace(modKey))
+            return WellOfSoulsTierResult.Unknown(text, value, "missing typed Well mod key");
+
+        string ruleId = "repoe_desecrated_" + modKey.Trim();
+        var rule = _database.Rules.FirstOrDefault(rule => string.Equals(rule.Id, ruleId, StringComparison.Ordinal));
+        if (rule == null)
+            return WellOfSoulsTierResult.Unknown(text, value, "no local tier rule for typed mod key");
+
+        if (!RuleMatchesItem(rule, item))
+            return WellOfSoulsTierResult.Unknown(text, value, "typed mod key not applicable to item class");
+
+        List<double> values = string.IsNullOrWhiteSpace(text)
+            ? []
+            : ExtractValuesForRule(rule, text);
+
+        return BuildKnownResult(rule, item, text, values, fallbackItemLevel);
+    }
+
+    private WellOfSoulsTierResult BuildKnownResult(WellTierRule rule, ItemSnapshot? item, string text, List<double> values, int fallbackItemLevel)
+    {
+        double? value = values.Count > 0 ? values[0] : null;
         int itemLevel = item?.ItemLevel > 0 ? item.ItemLevel : Math.Max(0, fallbackItemLevel);
         var allTiers = rule.Tiers
             .OrderBy(tier => tier.Tier)
