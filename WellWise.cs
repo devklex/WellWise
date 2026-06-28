@@ -1172,7 +1172,10 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             float lineHeight = ImGui.GetTextLineHeight();
             float width = Math.Clamp(lines.Max(MeasureLineWidth) + 18f, 190f, 720f);
             float height = lines.Count * lineHeight + 10f;
-            var box = PickTierBadgeRect(option.Rect, width, height);
+            var anchor = GetTierBadgeAnchor(option, drawInfos);
+            var box = anchor.HasRowRect
+                ? PickTierBadgeRectInsideRow(anchor.RowRect, anchor.TextRect, width, height)
+                : PickTierBadgeRect(anchor.TextRect, width, height);
 
             Graphics.DrawBox(box, Color.FromArgb(232, 4, 4, 4));
             Graphics.DrawFrame(box, Color.FromArgb(210, 195, 176, 95), 1);
@@ -3336,6 +3339,244 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             y = optionRect.Bottom + pad;
 
         return ClampToDisplay(new RectangleF(x, y, width, height));
+    }
+
+    private static RectangleF PickTierBadgeRectInsideRow(RectangleF rowRect, RectangleF textRect, float width, float height)
+    {
+        const float pad = 5f;
+        float minX = rowRect.Left + pad;
+        float maxX = rowRect.Right - width - pad;
+        float x = CenterX(textRect) - width * 0.5f;
+        x = maxX >= minX ? Math.Clamp(x, minX, maxX) : rowRect.X + (rowRect.Width - width) * 0.5f;
+
+        float minY = rowRect.Top + pad;
+        float maxY = rowRect.Bottom - height - pad;
+        float y;
+        if (maxY >= minY)
+        {
+            float belowTextY = textRect.Bottom + pad;
+            float aboveTextY = textRect.Top - height - pad;
+            if (belowTextY >= minY && belowTextY <= maxY)
+                y = belowTextY;
+            else if (aboveTextY >= minY && aboveTextY <= maxY)
+                y = aboveTextY;
+            else
+                y = Math.Clamp(rowRect.Bottom - height - pad, minY, maxY);
+        }
+        else
+        {
+            y = rowRect.Y + (rowRect.Height - height) * 0.5f;
+        }
+
+        return ClampToDisplay(new RectangleF(x, y, width, height));
+    }
+
+    private static (RectangleF TextRect, RectangleF RowRect, bool HasRowRect) GetTierBadgeAnchor(WellOption option, IReadOnlyList<WellDrawInfo> drawInfos)
+    {
+        var textRect = GetTierBadgeTextRect(option);
+        if (!IsDrawableRect(textRect))
+            return (option.Rect, default, false);
+
+        if (TryGetOwnTierBadgeRowRect(option, textRect, out var rowRect))
+            return (textRect, rowRect, true);
+
+        if (TryInferTierBadgeRowRectFromSiblings(option, textRect, drawInfos, out rowRect))
+            return (textRect, rowRect, true);
+
+        return (textRect, default, false);
+    }
+
+    private static RectangleF GetTierBadgeTextRect(WellOption option)
+    {
+        if (SafeVisible(option.TextElement) &&
+            TryGetRect(option.TextElement, out var textRect) &&
+            LooksLikeTierBadgeTextRect(textRect, option.Rect))
+        {
+            return textRect;
+        }
+
+        return option.Rect;
+    }
+
+    private static bool LooksLikeTierBadgeTextRect(RectangleF candidate, RectangleF optionRect)
+    {
+        if (!IsDrawableRect(candidate))
+            return false;
+
+        if (candidate.Height > 90f || candidate.Width > 1100f)
+            return false;
+
+        return !IsDrawableRect(optionRect) || RectCenterInside(ExpandRect(optionRect, 8f), candidate);
+    }
+
+    private static bool TryGetOwnTierBadgeRowRect(WellOption option, RectangleF textRect, out RectangleF rowRect)
+    {
+        if (LooksLikeTierBadgeRowRect(option.Rect, textRect))
+        {
+            rowRect = option.Rect;
+            return true;
+        }
+
+        if (TryGetVisibleTierBadgeRowRect(option.Element, textRect, out rowRect))
+            return true;
+
+        foreach (var element in GetShortParentChain(option.TextElement, maxDepth: 4))
+            if (TryGetVisibleTierBadgeRowRect(element, textRect, out rowRect))
+                return true;
+
+        foreach (var element in GetShortParentChain(option.Element, maxDepth: 3))
+            if (TryGetVisibleTierBadgeRowRect(element, textRect, out rowRect))
+                return true;
+
+        rowRect = default;
+        return false;
+    }
+
+    private static bool TryInferTierBadgeRowRectFromSiblings(WellOption option, RectangleF textRect, IReadOnlyList<WellDrawInfo> drawInfos, out RectangleF rowRect)
+    {
+        var knownRows = new List<(int Index, RectangleF RowRect, RectangleF TextRect)>();
+        foreach (var drawInfo in drawInfos)
+        {
+            var sibling = drawInfo.Option;
+            if (sibling.Index == option.Index)
+                continue;
+
+            var siblingTextRect = GetTierBadgeTextRect(sibling);
+            if (TryGetOwnTierBadgeRowRect(sibling, siblingTextRect, out var siblingRowRect))
+                knownRows.Add((sibling.Index, siblingRowRect, siblingTextRect));
+        }
+
+        var beforeRows = knownRows
+            .Where(row => row.Index < option.Index)
+            .OrderByDescending(row => row.Index)
+            .ToList();
+        var afterRows = knownRows
+            .Where(row => row.Index > option.Index)
+            .OrderBy(row => row.Index)
+            .ToList();
+
+        if (beforeRows.Count > 0 && afterRows.Count > 0)
+        {
+            var before = beforeRows[0];
+            var after = afterRows[0];
+            if (TierBadgeRowsCompatible(before.RowRect, after.RowRect))
+            {
+                float t = (float)(option.Index - before.Index) / (after.Index - before.Index);
+                var inferred = new RectangleF(
+                    before.RowRect.X + (after.RowRect.X - before.RowRect.X) * t,
+                    before.RowRect.Y + (after.RowRect.Y - before.RowRect.Y) * t,
+                    before.RowRect.Width + (after.RowRect.Width - before.RowRect.Width) * t,
+                    before.RowRect.Height + (after.RowRect.Height - before.RowRect.Height) * t);
+
+                if (LooksLikeTierBadgeRowRect(inferred, textRect))
+                {
+                    rowRect = inferred;
+                    return true;
+                }
+            }
+        }
+
+        foreach (var sibling in knownRows.OrderBy(row => Math.Abs(row.Index - option.Index)))
+        {
+            int indexDelta = option.Index - sibling.Index;
+            if (indexDelta == 0)
+                continue;
+
+            float textCenterStep = (CenterY(textRect) - CenterY(sibling.TextRect)) / indexDelta;
+            float absStep = Math.Abs(textCenterStep);
+            if (absStep < 80f || absStep > 240f)
+                continue;
+
+            if (Math.Abs(absStep - sibling.RowRect.Height) > Math.Max(36f, sibling.RowRect.Height * 0.35f))
+                continue;
+
+            var inferred = new RectangleF(
+                sibling.RowRect.X,
+                sibling.RowRect.Y + textCenterStep * indexDelta,
+                sibling.RowRect.Width,
+                sibling.RowRect.Height);
+
+            if (LooksLikeTierBadgeRowRect(inferred, textRect))
+            {
+                rowRect = inferred;
+                return true;
+            }
+        }
+
+        rowRect = default;
+        return false;
+    }
+
+    private static bool TierBadgeRowsCompatible(RectangleF left, RectangleF right)
+    {
+        float averageHeight = (left.Height + right.Height) * 0.5f;
+        float averageWidth = (left.Width + right.Width) * 0.5f;
+        return Math.Abs(left.Height - right.Height) <= Math.Max(24f, averageHeight * 0.25f) &&
+               Math.Abs(left.Width - right.Width) <= Math.Max(96f, averageWidth * 0.20f) &&
+               Math.Abs(left.X - right.X) <= Math.Max(96f, averageWidth * 0.15f);
+    }
+
+    private static IEnumerable<Element> GetShortParentChain(Element? element, int maxDepth)
+    {
+        var seen = new HashSet<long>();
+        var current = element;
+        for (int depth = 0; depth < maxDepth && current != null && current.Address != 0; depth++)
+        {
+            current = TryGetElementProperty(current, "Parent");
+            if (current == null || current.Address == 0 || !seen.Add((long)current.Address))
+                yield break;
+
+            yield return current;
+        }
+    }
+
+    private static bool TryGetVisibleTierBadgeRowRect(Element? element, RectangleF textRect, out RectangleF rect)
+    {
+        rect = default;
+        if (element == null || !SafeVisible(element))
+            return false;
+
+        if (!TryGetRect(element, out var candidate) || !IsDrawableRect(candidate))
+            return false;
+
+        if (!LooksLikeTierBadgeRowRect(candidate, textRect))
+            return false;
+
+        rect = candidate;
+        return true;
+    }
+
+    private static bool LooksLikeTierBadgeRowRect(RectangleF candidate, RectangleF textRect)
+    {
+        if (!IsDrawableRect(candidate) || !IsDrawableRect(textRect))
+            return false;
+
+        if (candidate.Width < textRect.Width - 4f)
+            return false;
+
+        if (candidate.Width < 350f || candidate.Width > 1250f)
+            return false;
+
+        if (candidate.Height < 90f || candidate.Height > 220f)
+            return false;
+
+        if (!RectCenterInside(ExpandRect(candidate, 8f), textRect))
+            return false;
+
+        var overlap = IntersectionRect(candidate, textRect);
+        return Area(overlap) >= Area(textRect) * 0.6f;
+    }
+
+    private static RectangleF IntersectionRect(RectangleF a, RectangleF b)
+    {
+        float left = Math.Max(a.Left, b.Left);
+        float top = Math.Max(a.Top, b.Top);
+        float right = Math.Min(a.Right, b.Right);
+        float bottom = Math.Min(a.Bottom, b.Bottom);
+        if (right <= left || bottom <= top)
+            return default;
+
+        return new RectangleF(left, top, right - left, bottom - top);
     }
 
     private static RectangleF ClampToDisplay(RectangleF rect)
