@@ -451,6 +451,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
                 var cachedState = new WellState(_options, _itemContext, WindowVisible: _options.Count > 0);
                 AppendWellStateReport(report, "Continuous cached overlay state", cachedState, _itemContext, _drawInfos);
 
+                AppendTypedWellApiProbeReport(report);
                 AppendCandidateRootReport(report);
                 AppendRuntimeProbeReport(report, freshState, freshItem);
             }
@@ -790,6 +791,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             var cachedState = new WellState(_options, _itemContext, WindowVisible: _options.Count > 0);
             AppendWellStateReport(report, "Cached overlay state", cachedState, _itemContext, _drawInfos);
 
+            AppendTypedWellApiProbeReport(report);
             AppendCandidateRootReport(report);
             AppendRuntimeProbeReport(report, freshState, freshItem);
 
@@ -824,6 +826,164 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         }
 
         report.AppendLine();
+    }
+
+    private void AppendTypedWellApiProbeReport(StringBuilder report)
+    {
+        report.AppendLine("[Typed Well API probe]");
+        try
+        {
+            var window = GameController.Game.IngameState.IngameUi.WellOfSoulsWindow;
+            report.AppendLine($"Window: {FormatElement(window)}");
+            report.AppendLine($"WindowRuntimeType: {window?.GetType().FullName ?? "null"}");
+            if (window == null)
+            {
+                report.AppendLine();
+                return;
+            }
+
+            AppendSafeReportValue(report, "", "Item", () => ReadDiagnosticProperty(window, "Item") == null ? "null" : "present");
+            AppendSafeReportValue(report, "", "ItemSlot", () => FormatElement(ReadDiagnosticProperty(window, "ItemSlot") as Element));
+            AppendSafeReportValue(report, "", "ConfirmButton", () => FormatElement(ReadDiagnosticProperty(window, "ConfirmButton") as Element));
+
+            IEnumerable? revealOptions = null;
+            try
+            {
+                revealOptions = ReadDiagnosticProperty(window, "RevealOptions") as IEnumerable;
+                report.AppendLine($"RevealOptions: {(revealOptions == null ? "null" : "present")} count={GetReportEnumerableCount(revealOptions)}");
+            }
+            catch (Exception ex)
+            {
+                report.AppendLine($"RevealOptions: failed: {ex.Message}");
+            }
+
+            if (revealOptions != null)
+            {
+                int index = 1;
+                foreach (var option in revealOptions)
+                    AppendTypedWellRevealOptionReport(report, index++, option);
+            }
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"Typed Well API probe failed: {ex}");
+        }
+
+        report.AppendLine();
+    }
+
+    private static void AppendTypedWellRevealOptionReport(StringBuilder report, int index, object? option)
+    {
+        report.AppendLine($"Option {index}: {FormatElement(option as Element)}");
+        if (option == null)
+            return;
+
+        try
+        {
+            var mod = ReadDiagnosticProperty(option, "Mod");
+            report.AppendLine($"  Mod: {(mod == null ? "null" : "present")}");
+            if (mod == null)
+                return;
+
+            AppendSafeReportValue(report, "  ", "Mod.Key", () => ReadDiagnosticProperty(mod, "Key"));
+            AppendSafeReportValue(report, "  ", "Mod.UserFriendlyName", () => ReadDiagnosticProperty(mod, "UserFriendlyName"));
+            AppendSafeReportValue(report, "  ", "Mod.Tier", () => ReadDiagnosticProperty(mod, "Tier"));
+            AppendSafeReportValue(report, "  ", "Mod.AffixType", () => ReadDiagnosticProperty(mod, "AffixType"));
+            AppendSafeReportValue(report, "  ", "Mod.MinLevel", () => ReadDiagnosticProperty(mod, "MinLevel"));
+            AppendSafeReportValue(report, "  ", "Mod.StatNames", () => ReadDiagnosticProperty(mod, "StatNames"));
+            AppendSafeReportValue(report, "  ", "Mod.StatRange", () => ReadDiagnosticProperty(mod, "StatRange"));
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"  Mod: failed: {ex.Message}");
+        }
+    }
+
+    private static object? ReadDiagnosticProperty(object? source, string propertyName)
+    {
+        if (source == null)
+            return null;
+
+        var type = source.GetType();
+        var properties = type
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Where(p => p.Name == propertyName && p.GetIndexParameters().Length == 0)
+            .ToList();
+
+        if (properties.Count == 0)
+            throw new MissingMemberException(type.FullName, propertyName);
+
+        var property =
+            properties.FirstOrDefault(p => p.DeclaringType == type && p.CanRead) ??
+            properties.FirstOrDefault(p => p.CanRead);
+
+        if (property == null)
+            throw new MissingMemberException(type.FullName, propertyName);
+
+        return property.GetValue(source);
+    }
+
+    private static int GetReportEnumerableCount(IEnumerable? enumerable)
+    {
+        if (enumerable == null)
+            return 0;
+
+        if (enumerable is ICollection collection)
+            return collection.Count;
+
+        int count = 0;
+        foreach (var _ in enumerable)
+            count++;
+
+        return count;
+    }
+
+    private static void AppendSafeReportValue(StringBuilder report, string indent, string label, Func<object?> read)
+    {
+        try
+        {
+            report.AppendLine($"{indent}{label}: {FormatReportValue(read())}");
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine($"{indent}{label}: failed: {ex.Message}");
+        }
+    }
+
+    private static string FormatReportValue(object? value, int maxLength = 220)
+    {
+        if (value == null)
+            return "null";
+
+        try
+        {
+            if (value is string text)
+                return TrimForReport(text, maxLength);
+
+            if (value is IEnumerable enumerable)
+            {
+                var parts = new List<string>();
+                int count = 0;
+                foreach (var item in enumerable)
+                {
+                    if (count++ >= 8)
+                    {
+                        parts.Add("...");
+                        break;
+                    }
+
+                    parts.Add(TrimForReport(item?.ToString() ?? "null", 80));
+                }
+
+                return TrimForReport("[" + string.Join(", ", parts) + "]", maxLength);
+            }
+
+            return TrimForReport(value.ToString() ?? "", maxLength);
+        }
+        catch (Exception ex)
+        {
+            return $"failed: {ex.Message}";
+        }
     }
 
     private void AppendCandidateRootReport(StringBuilder report)
