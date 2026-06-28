@@ -14,6 +14,8 @@ var tests = new (string Name, Action Body)[]
     ("jewel cold penetration resolves", JewelColdPenetration),
     ("staff block chance uses current self-extracted range", StaffBlockChanceUsesCurrentRange),
     ("staff block chance legacy range remains recognized", StaffBlockChanceLegacyRange),
+    ("staff Puppet Master stacks resolves", StaffPuppetMasterStacksResolves),
+    ("staff Puppet Master stacks stays class-specific", StaffPuppetMasterStacksStaysClassSpecific),
     ("otherworldly ring mana before life resolves", OtherworldlyRingDamageTakenFromManaBeforeLife),
     ("otherworldly amulet scaled critical chance uses display range", OtherworldlyAmuletFireSpellCriticalChance),
     ("otherworldly belt no-number stat resolves without fake range", OtherworldlyBeltMeleeSplash),
@@ -152,6 +154,23 @@ static void StaffBlockChanceLegacyRange()
     AssertEqual(true, result.CurrentTier?.Legacy, "legacy staff block chance marker");
     AssertContains(result.Summary, "Legacy T1 +12-16%", "legacy staff block chance range");
     AssertContains(result.Summary, "item max T1 +20-25%", "legacy staff block chance current item max");
+}
+
+static void StaffPuppetMasterStacksResolves()
+{
+    var result = CreateResolver().Resolve(Item("Staff", 80), "+3 maximum stacks of Puppet Master");
+    AssertKnown(result);
+    AssertContains(result.RuleId, "AbyssModStaffKurgalSuffixPuppetMasterStacks", "staff Puppet Master stacks rule id");
+    AssertEqual(1, result.CurrentTier?.Tier, "staff Puppet Master stacks tier");
+    AssertEqualIgnoreCase("suffix", result.AffixType, "staff Puppet Master stacks affix type");
+    AssertEqual(3d, result.CurrentTier?.Min, "staff Puppet Master stacks minimum");
+    AssertEqual(4d, result.CurrentTier?.Max, "staff Puppet Master stacks maximum");
+}
+
+static void StaffPuppetMasterStacksStaysClassSpecific()
+{
+    var result = CreateResolver().Resolve(Item("Ring", 80), "+3 maximum stacks of Puppet Master");
+    AssertFalse(result.Known, "Staff-only Puppet Master stacks rule should not resolve for a ring");
 }
 
 static void OtherworldlyRingDamageTakenFromManaBeforeLife()
