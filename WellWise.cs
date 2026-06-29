@@ -242,7 +242,10 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             }
 
             bool useActiveTransitionCadence = false;
-            if (state.AwaitingRevealPrompt)
+            bool promptRevealState = state.WindowVisible &&
+                                     state.Options.Count == 0 &&
+                                     (state.AwaitingRevealPrompt || state.RevealButtonVisible || state.PromptTextVisible);
+            if (promptRevealState)
             {
                 _options = [];
                 _drawInfos = [];
@@ -281,11 +284,11 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             _drawInfos = BuildDrawInfos(_options, _itemContext);
             Settings.LastStatus.Value = _resolver.LoadStatus;
             Settings.LastContext.Value = FormatContext(_itemContext);
-            Settings.LastOptions.Value = state.AwaitingRevealPrompt
+            Settings.LastOptions.Value = promptRevealState
                 ? "Well prompt visible; waiting for reveal"
                 : _options.Count == 0 ? "No Well options found" : $"{_options.Count} Well options";
             _consecutivePartialReads = 0;
-            if (state.Options.Count >= 3 || state.AwaitingRevealPrompt)
+            if (state.Options.Count >= 3 || promptRevealState)
                 _consecutiveIncompleteChoiceReads = 0;
             _partialCooldownUntil = DateTime.MinValue;
             _nextScanAt = now + (useActiveTransitionCadence ? ActiveTransitionScanInterval : ScanInterval);
@@ -743,6 +746,44 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         return true;
     }
 
+    private bool TryReadTypedWellState(out WellState state, out Element? typedWindow)
+    {
+        state = new WellState([], null);
+        typedWindow = null;
+
+        try
+        {
+            if (!TryGetVisibleTypedWellWindow(out typedWindow, out var windowRect))
+                return false;
+
+            var context = BuildWellItemContext(typedWindow);
+            if (context == null)
+                return false;
+
+            if (_itemContext != null && !SameWellItemContext(context, _itemContext))
+                return false;
+
+            if (!TryBuildTypedWellOptions(typedWindow, windowRect, out var options))
+                return false;
+
+            state = new WellState(
+                options,
+                context,
+                AwaitingRevealPrompt: false,
+                WindowVisible: true,
+                RevealButtonVisible: false,
+                ConfirmButtonVisible: true,
+                PromptTextVisible: false);
+            return true;
+        }
+        catch
+        {
+            state = new WellState([], null);
+            typedWindow = null;
+            return false;
+        }
+    }
+
     private bool TryGetTypedFallbackItemContext(WellState state, out ItemSnapshot itemContext)
     {
         itemContext = null!;
@@ -800,78 +841,104 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     {
         options = [];
 
-        Element? typedWindow;
+        if (!TryGetVisibleTypedWellWindow(out var typedWindow, out var windowRect))
+            return false;
+
+        return TryBuildTypedWellOptions(typedWindow, windowRect, out options);
+    }
+
+    private bool TryBuildTypedWellOptions(Element typedWindow, RectangleF windowRect, out List<WellOption> options)
+    {
+        options = [];
+
         try
         {
-            typedWindow = TryGetElementProperty(GameController.Game.IngameState.IngameUi, "WellOfSoulsWindow");
+            if (TryReadObjectProperty(typedWindow, "Item") == null)
+                return false;
+
+            var confirmButton = TryGetElementProperty(typedWindow, "ConfirmButton");
+            if (confirmButton == null || confirmButton.Address == 0 || !SafeVisible(confirmButton))
+                return false;
+
+            if (!TryGetRect(confirmButton, out var confirmRect) || !IsDrawableRect(confirmRect))
+                return false;
+
+            if (TryReadObjectProperty(typedWindow, "RevealOptions") is not IEnumerable revealOptionsEnumerable)
+                return false;
+
+            var rawOptions = new List<object?>();
+            foreach (var rawOption in revealOptionsEnumerable)
+            {
+                rawOptions.Add(rawOption);
+                if (rawOptions.Count > 3)
+                    return false;
+            }
+
+            if (rawOptions.Count != 3)
+                return false;
+
+            var candidates = new List<TypedWellOptionCandidate>();
+            for (int i = 0; i < rawOptions.Count; i++)
+            {
+                if (!TryBuildTypedWellOption(rawOptions[i], i, windowRect, out var candidate))
+                    return false;
+
+                candidates.Add(candidate);
+            }
+
+            var orderedCandidates = candidates
+                .OrderBy(candidate => candidate.Rect.Y)
+                .ThenBy(candidate => candidate.Rect.X)
+                .ToList();
+
+            if (!TypedWellRowsAreCompatible(orderedCandidates, windowRect))
+                return false;
+
+            options = orderedCandidates
+                .Select((candidate, index) => new WellOption(
+                    index + 1,
+                    $"typed:RevealOptions[{candidate.SourceIndex}]",
+                    candidate.Element,
+                    candidate.Element,
+                    candidate.Text,
+                    candidate.RawText,
+                    candidate.Rect,
+                    candidate.ModKey))
+                .ToList();
+            return true;
+        }
+        catch
+        {
+            options = [];
+            return false;
+        }
+    }
+
+    private bool TryGetVisibleTypedWellWindow(out Element typedWindow, out RectangleF windowRect)
+    {
+        typedWindow = null!;
+        windowRect = default;
+
+        try
+        {
+            var window = TryGetElementProperty(GameController.Game.IngameState.IngameUi, "WellOfSoulsWindow");
+            if (window == null ||
+                window.Address == 0 ||
+                !SafeVisible(window) ||
+                !TryGetRect(window, out var rect) ||
+                !IsDrawableRect(rect))
+            {
+                return false;
+            }
+
+            typedWindow = window;
+            windowRect = rect;
+            return true;
         }
         catch
         {
             return false;
         }
-
-        if (typedWindow == null ||
-            typedWindow.Address == 0 ||
-            !SafeVisible(typedWindow) ||
-            !TryGetRect(typedWindow, out var windowRect) ||
-            !IsDrawableRect(windowRect))
-        {
-            return false;
-        }
-
-        if (TryReadObjectProperty(typedWindow, "Item") == null)
-            return false;
-
-        var confirmButton = TryGetElementProperty(typedWindow, "ConfirmButton");
-        if (confirmButton == null || confirmButton.Address == 0 || !SafeVisible(confirmButton))
-            return false;
-
-        if (!TryGetRect(confirmButton, out var confirmRect) || !IsDrawableRect(confirmRect))
-            return false;
-
-        if (TryReadObjectProperty(typedWindow, "RevealOptions") is not IEnumerable revealOptionsEnumerable)
-            return false;
-
-        var rawOptions = new List<object?>();
-        foreach (var rawOption in revealOptionsEnumerable)
-        {
-            rawOptions.Add(rawOption);
-            if (rawOptions.Count > 3)
-                return false;
-        }
-
-        if (rawOptions.Count != 3)
-            return false;
-
-        var candidates = new List<TypedWellOptionCandidate>();
-        for (int i = 0; i < rawOptions.Count; i++)
-        {
-            if (!TryBuildTypedWellOption(rawOptions[i], i, windowRect, out var candidate))
-                return false;
-
-            candidates.Add(candidate);
-        }
-
-        var orderedCandidates = candidates
-            .OrderBy(candidate => candidate.Rect.Y)
-            .ThenBy(candidate => candidate.Rect.X)
-            .ToList();
-
-        if (!TypedWellRowsAreCompatible(orderedCandidates, windowRect))
-            return false;
-
-        options = orderedCandidates
-            .Select((candidate, index) => new WellOption(
-                index + 1,
-                $"typed:RevealOptions[{candidate.SourceIndex}]",
-                candidate.Element,
-                candidate.Element,
-                candidate.Text,
-                candidate.RawText,
-                candidate.Rect,
-                candidate.ModKey))
-            .ToList();
-        return true;
     }
 
     private static bool TryBuildTypedWellOption(object? rawOption, int sourceIndex, RectangleF windowRect, out TypedWellOptionCandidate candidate)
@@ -893,7 +960,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
         string rawTranslation = ReadObjectStringProperty(modInstance, "Translation");
         string text = NormalizeTypedWellTranslation(rawTranslation);
-        if (!IsWellRowOptionText(text) || LooksLikeTooltipOrItemText(text))
+        if (!IsUsableTypedWellTranslation(rawTranslation, text))
             return false;
 
         string modKey = TryGetTypedModKey(rawOption, modInstance);
@@ -921,7 +988,42 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             return match.Groups["first"].Value;
         });
 
-        return NormalizeWhitespace(displayText);
+        string normalized = NormalizeWhitespace(displayText);
+        return CollapseRepeatedTypedTranslation(normalized);
+    }
+
+    private static string CollapseRepeatedTypedTranslation(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return text;
+
+        var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length < 2 || words.Length % 2 != 0)
+            return text;
+
+        int halfLength = words.Length / 2;
+        for (int i = 0; i < halfLength; i++)
+        {
+            if (!string.Equals(words[i], words[i + halfLength], StringComparison.Ordinal))
+                return text;
+        }
+
+        return string.Join(' ', words.Take(halfLength));
+    }
+
+    private static bool IsUsableTypedWellTranslation(string rawTranslation, string text)
+    {
+        if (string.IsNullOrWhiteSpace(rawTranslation) || string.IsNullOrWhiteSpace(text))
+            return false;
+
+        string normalizedRaw = NormalizeWhitespace(rawTranslation);
+        if (normalizedRaw.StartsWith("<unknown", StringComparison.OrdinalIgnoreCase) ||
+            NormalizeWhitespace(text).StartsWith("<unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return IsWellRowOptionText(text) && !LooksLikeTooltipOrItemText(text);
     }
 
     private static string TryGetTypedModKey(object option, object modInstance)
@@ -1652,6 +1754,9 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             var option = drawInfo.Option;
             if (!IsDrawableRect(option.Rect))
                 continue;
+            if (option.Path.StartsWith("typed:RevealOptions[", StringComparison.Ordinal) &&
+                (!SafeVisible(option.Element) || !SafeVisible(option.TextElement)))
+                continue;
 
             var lines = BuildTierBadgeLines(drawInfo.TierResult);
             if (Settings.ShowOptionText.Value)
@@ -1881,6 +1986,14 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     {
         try
         {
+            if (TryReadTypedWellState(out var typedState, out var typedWindow))
+            {
+                if (updateCache && typedWindow != null)
+                    _cachedWellRoot = typedWindow;
+
+                return typedState;
+            }
+
             var candidates = new List<WellRootCandidate>();
             var seenRoots = new HashSet<long>();
             int order = 0;
@@ -3786,6 +3899,8 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     {
         if (!IsWellRowOptionText(text))
             return false;
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
 
         string normalized = NormalizeWhitespace(text);
         return normalized.Any(char.IsDigit);
@@ -3794,6 +3909,8 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private static bool IsStrictScreenOptionText(string? text)
     {
         if (!IsWellRowOptionText(text))
+            return false;
+        if (string.IsNullOrWhiteSpace(text))
             return false;
 
         string normalized = NormalizeWhitespace(text);
