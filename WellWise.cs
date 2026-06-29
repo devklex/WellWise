@@ -25,7 +25,8 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private sealed record ElementSearchHit(string RootName, string Path, Element Element, Element? Parent);
     private sealed record ElementCandidate(Element Element, string Path, RectangleF Rect);
     private sealed record ChoiceRowMatch(Element RowElement, Element TextElement, string Path, string Text, string RawText, RectangleF RowRect, RectangleF TextRect);
-    private sealed record WellOption(int Index, string Path, Element Element, Element TextElement, string Text, string RawText, RectangleF Rect);
+    private sealed record WellOption(int Index, string Path, Element Element, Element TextElement, string Text, string RawText, RectangleF Rect, string ModKey = "");
+    private sealed record TypedWellOptionCandidate(int SourceIndex, Element Element, string Text, string RawText, string ModKey, RectangleF Rect);
     private sealed record WellDrawInfo(WellOption Option, WellOfSoulsTierResult TierResult);
     private sealed record WellState(
         List<WellOption> Options,
@@ -40,6 +41,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private sealed record TextCandidate(Element Element, string Path, string Text, string RawText, RectangleF Rect);
 
     private static readonly Regex WellRollValueRegex = new(@"(?<prefix>[+-]?)\s*(?<value>\d+(?:\.\d+)?)(?<suffix>%?)", RegexOptions.Compiled);
+    private static readonly Regex TypedWellTranslationTokenRegex = new(@"\[(?<first>[^\]|]+)(?:\|(?<second>[^\]]+))?\]", RegexOptions.Compiled);
 
     private readonly WellOfSoulsTierResolver _resolver = new();
     private readonly Dictionary<string, DateTime> _nextDebugFailureLogAt = new(StringComparer.OrdinalIgnoreCase);
@@ -576,6 +578,37 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         }
     }
 
+    private static object? TryReadObjectProperty(object? obj, string propertyName)
+    {
+        if (obj == null)
+            return null;
+
+        try
+        {
+            var type = obj.GetType();
+            var properties = type
+                .GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                .Where(prop => prop.Name == propertyName && prop.GetIndexParameters().Length == 0 && prop.CanRead)
+                .ToList();
+
+            if (properties.Count == 0)
+                return null;
+
+            var prop =
+                properties.FirstOrDefault(prop => prop.DeclaringType == type) ??
+                properties.FirstOrDefault();
+
+            if (prop == null)
+                return null;
+
+            return prop.GetValue(obj);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private bool HandlePartialOptionRead(WellState state, DateTime now)
     {
         bool activeChoiceState = state.WindowVisible &&
@@ -592,6 +625,12 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         // only by dropping cached Element handles and forcing re-acquisition.
         if (activeChoiceState && (_itemContext != null || state.ItemContext != null || state.Options.Count > 0))
         {
+            if (TryGetTypedFallbackItemContext(state, out var currentItemContext) &&
+                TryApplyTypedWellFallbackFromPartialState(state, currentItemContext, now))
+            {
+                return true;
+            }
+
             _consecutiveIncompleteChoiceReads++;
             _consecutivePartialReads = state.Options.Count > 0 ? _consecutivePartialReads + 1 : 0;
             _options = [];
@@ -702,6 +741,250 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
         Settings.LastOptions.Value = $"Partial Well options ({state.Options.Count}/3); retrying {_consecutivePartialReads}/{MaxConsecutivePartialReads}";
         return true;
+    }
+
+    private bool TryGetTypedFallbackItemContext(WellState state, out ItemSnapshot itemContext)
+    {
+        itemContext = null!;
+
+        if (_itemContext != null)
+        {
+            if (state.ItemContext != null && !SameWellItemContext(state.ItemContext, _itemContext))
+                return false;
+
+            itemContext = _itemContext;
+            return true;
+        }
+
+        if (state.ItemContext == null)
+            return false;
+
+        itemContext = state.ItemContext;
+        return true;
+    }
+
+    private bool TryApplyTypedWellFallbackFromPartialState(WellState state, ItemSnapshot currentItemContext, DateTime now)
+    {
+        if (!state.WindowVisible ||
+            state.AwaitingRevealPrompt ||
+            state.RevealButtonVisible ||
+            !state.ConfirmButtonVisible ||
+            state.Options.Count >= 3)
+        {
+            return false;
+        }
+
+        if (!TryBuildTypedWellOptions(out var typedOptions))
+            return false;
+
+        _options = typedOptions;
+        _itemContext = currentItemContext;
+        _drawInfos = BuildDrawInfos(_options, _itemContext);
+        _consecutivePartialReads = 0;
+        _consecutiveIncompleteChoiceReads = 0;
+        _consecutiveSoftRebinds = 0;
+        _partialCooldownUntil = DateTime.MinValue;
+        _softRebindUntil = DateTime.MinValue;
+        _activeWellTransitionUntil = DateTime.MinValue;
+        ClearStaleChoiceUiNotice();
+
+        Settings.LastStatus.Value = _resolver.LoadStatus;
+        Settings.LastContext.Value = FormatContext(_itemContext);
+        Settings.LastOptions.Value = "3 Well options (typed fallback)";
+        _nextScanAt = now + ScanInterval;
+        _nextBroadScanAt = now + BroadScanInterval;
+        return true;
+    }
+
+    private bool TryBuildTypedWellOptions(out List<WellOption> options)
+    {
+        options = [];
+
+        Element? typedWindow;
+        try
+        {
+            typedWindow = TryGetElementProperty(GameController.Game.IngameState.IngameUi, "WellOfSoulsWindow");
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (typedWindow == null ||
+            typedWindow.Address == 0 ||
+            !SafeVisible(typedWindow) ||
+            !TryGetRect(typedWindow, out var windowRect) ||
+            !IsDrawableRect(windowRect))
+        {
+            return false;
+        }
+
+        if (TryReadObjectProperty(typedWindow, "Item") == null)
+            return false;
+
+        var confirmButton = TryGetElementProperty(typedWindow, "ConfirmButton");
+        if (confirmButton == null || confirmButton.Address == 0 || !SafeVisible(confirmButton))
+            return false;
+
+        if (!TryGetRect(confirmButton, out var confirmRect) || !IsDrawableRect(confirmRect))
+            return false;
+
+        if (TryReadObjectProperty(typedWindow, "RevealOptions") is not IEnumerable revealOptionsEnumerable)
+            return false;
+
+        var rawOptions = new List<object?>();
+        foreach (var rawOption in revealOptionsEnumerable)
+        {
+            rawOptions.Add(rawOption);
+            if (rawOptions.Count > 3)
+                return false;
+        }
+
+        if (rawOptions.Count != 3)
+            return false;
+
+        var candidates = new List<TypedWellOptionCandidate>();
+        for (int i = 0; i < rawOptions.Count; i++)
+        {
+            if (!TryBuildTypedWellOption(rawOptions[i], i, windowRect, out var candidate))
+                return false;
+
+            candidates.Add(candidate);
+        }
+
+        var orderedCandidates = candidates
+            .OrderBy(candidate => candidate.Rect.Y)
+            .ThenBy(candidate => candidate.Rect.X)
+            .ToList();
+
+        if (!TypedWellRowsAreCompatible(orderedCandidates, windowRect))
+            return false;
+
+        options = orderedCandidates
+            .Select((candidate, index) => new WellOption(
+                index + 1,
+                $"typed:RevealOptions[{candidate.SourceIndex}]",
+                candidate.Element,
+                candidate.Element,
+                candidate.Text,
+                candidate.RawText,
+                candidate.Rect,
+                candidate.ModKey))
+            .ToList();
+        return true;
+    }
+
+    private static bool TryBuildTypedWellOption(object? rawOption, int sourceIndex, RectangleF windowRect, out TypedWellOptionCandidate candidate)
+    {
+        candidate = null!;
+
+        if (rawOption is not Element optionElement ||
+            optionElement.Address == 0 ||
+            !SafeVisible(optionElement) ||
+            !TryGetRect(optionElement, out var optionRect) ||
+            !LooksLikeTypedWellOptionRowRect(windowRect, optionRect))
+        {
+            return false;
+        }
+
+        var modInstance = TryReadObjectProperty(rawOption, "ModInstance");
+        if (modInstance == null)
+            return false;
+
+        string rawTranslation = ReadObjectStringProperty(modInstance, "Translation");
+        string text = NormalizeTypedWellTranslation(rawTranslation);
+        if (!IsWellRowOptionText(text) || LooksLikeTooltipOrItemText(text))
+            return false;
+
+        string modKey = TryGetTypedModKey(rawOption, modInstance);
+        candidate = new TypedWellOptionCandidate(
+            sourceIndex,
+            optionElement,
+            text,
+            NormalizeWhitespace(rawTranslation),
+            modKey,
+            optionRect);
+        return true;
+    }
+
+    private static string NormalizeTypedWellTranslation(string translation)
+    {
+        if (string.IsNullOrWhiteSpace(translation))
+            return string.Empty;
+
+        string displayText = TypedWellTranslationTokenRegex.Replace(translation, match =>
+        {
+            var display = match.Groups["second"];
+            if (display.Success && !string.IsNullOrWhiteSpace(display.Value))
+                return display.Value;
+
+            return match.Groups["first"].Value;
+        });
+
+        return NormalizeWhitespace(displayText);
+    }
+
+    private static string TryGetTypedModKey(object option, object modInstance)
+    {
+        var modRecord = TryReadObjectProperty(modInstance, "ModRecord");
+        string modKey = NormalizeWhitespace(ReadObjectStringProperty(modRecord, "Key"));
+        if (!string.IsNullOrWhiteSpace(modKey))
+            return modKey;
+
+        var mod = TryReadObjectProperty(option, "Mod");
+        return NormalizeWhitespace(ReadObjectStringProperty(mod, "Key"));
+    }
+
+    private static bool LooksLikeTypedWellOptionRowRect(RectangleF windowRect, RectangleF rowRect)
+    {
+        if (!IsDrawableRect(rowRect))
+            return false;
+
+        if (!RectCenterInside(ExpandRect(windowRect, 24f), rowRect))
+            return false;
+
+        if (rowRect.Width < windowRect.Width * 0.35f)
+            return false;
+
+        if (rowRect.Height < 26f || rowRect.Height > Math.Max(220f, windowRect.Height * 0.28f))
+            return false;
+
+        if (rowRect.Width > windowRect.Width * 0.98f && rowRect.Height > windowRect.Height * 0.75f)
+            return false;
+
+        return true;
+    }
+
+    private static bool TypedWellRowsAreCompatible(IReadOnlyList<TypedWellOptionCandidate> rows, RectangleF windowRect)
+    {
+        if (rows.Count != 3)
+            return false;
+
+        for (int i = 1; i < rows.Count; i++)
+        {
+            var previous = rows[i - 1].Rect;
+            var current = rows[i].Rect;
+            float previousCenter = previous.Y + previous.Height * 0.5f;
+            float currentCenter = current.Y + current.Height * 0.5f;
+            if (currentCenter - previousCenter < 20f)
+                return false;
+        }
+
+        float minCenterX = rows.Min(row => row.Rect.X + row.Rect.Width * 0.5f);
+        float maxCenterX = rows.Max(row => row.Rect.X + row.Rect.Width * 0.5f);
+        if (maxCenterX - minCenterX > windowRect.Width * 0.35f)
+            return false;
+
+        float minWidth = rows.Min(row => row.Rect.Width);
+        float maxWidth = rows.Max(row => row.Rect.Width);
+        float averageWidth = rows.Average(row => row.Rect.Width);
+        if (maxWidth - minWidth > Math.Max(180f, averageWidth * 0.35f))
+            return false;
+
+        float minHeight = rows.Min(row => row.Rect.Height);
+        float maxHeight = rows.Max(row => row.Rect.Height);
+        float averageHeight = rows.Average(row => row.Rect.Height);
+        return maxHeight - minHeight <= Math.Max(80f, averageHeight * 0.6f);
     }
 
     private void LoadData()
@@ -1338,8 +1621,18 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
         return options
             .Where(option => IsSafeOptionForDrawing(option))
-            .Select(option => new WellDrawInfo(option, _resolver.Resolve(item, option.Text)))
+            .Select(option => new WellDrawInfo(option, ResolveOptionTier(option, item)))
             .ToList();
+    }
+
+    private WellOfSoulsTierResult ResolveOptionTier(WellOption option, ItemSnapshot? item)
+    {
+        var textResult = _resolver.Resolve(item, option.Text);
+        if (textResult.Known || string.IsNullOrWhiteSpace(option.ModKey))
+            return textResult;
+
+        var modKeyResult = _resolver.ResolveByModKey(item, option.ModKey, option.Text);
+        return modKeyResult.Known ? modKeyResult : textResult;
     }
 
     private static bool IsSafeOptionForDrawing(WellOption option)
