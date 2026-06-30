@@ -18,6 +18,7 @@ var tests = new (string Name, Action Body)[]
     ("staff Puppet Master stacks stays class-specific", StaffPuppetMasterStacksStaysClassSpecific),
     ("staff Puppet Master mod key resolves", StaffPuppetMasterModKeyResolves),
     ("staff Puppet Master mod key stays class-specific", StaffPuppetMasterModKeyStaysClassSpecific),
+    ("staff Kulemak Unholy Might resolves", StaffKulemakUnholyMightResolves),
     ("typed mod key requires item context", TypedModKeyRequiresItemContext),
     ("unknown typed mod key stays unknown", UnknownTypedModKeyStaysUnknown),
     ("otherworldly ring mana before life resolves", OtherworldlyRingDamageTakenFromManaBeforeLife),
@@ -192,6 +193,18 @@ static void StaffPuppetMasterModKeyStaysClassSpecific()
 {
     var result = CreateResolver().ResolveByModKey(Item("Ring", 80), "AbyssModStaffKurgalSuffixPuppetMasterStacks");
     AssertFalse(result.Known, "Staff-only typed mod key should not resolve for a ring");
+}
+
+static void StaffKulemakUnholyMightResolves()
+{
+    var result = CreateResolver().Resolve(Item("Staff", 86), "55% increased Magnitude of Unholy Might buffs you grant You have Unholy Might");
+    AssertKnown(result);
+    AssertEqual("repoe_desecrated_UniqueKulemakUnholyMightAndMagnitude_1", result.RuleId, "staff Kulemak Unholy Might rule id");
+    AssertEqualIgnoreCase("prefix", result.AffixType, "staff Kulemak Unholy Might affix type");
+    AssertEqual(1, result.CurrentTier?.Tier, "staff Kulemak Unholy Might tier");
+    AssertEqual(28d, result.CurrentTier?.Min, "staff Kulemak Unholy Might minimum");
+    AssertEqual(56d, result.CurrentTier?.Max, "staff Kulemak Unholy Might maximum");
+    AssertContains(result.Summary, "28-56%", "staff Kulemak Unholy Might display range");
 }
 
 static void TypedModKeyRequiresItemContext()
