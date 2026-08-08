@@ -61,6 +61,8 @@ Then reload/compile source plugins in ExileCore2.
 - `ShowAreaDebugOverlay`: draws a small area-detection label showing whether WellWise thinks you are in The Well of Souls.
 - `DebugMode`: logs throttled scan errors to ExileCore2 logs.
 - `ReloadData`: reloads `data/well_of_souls_tiers.json` without restarting ExileCore2.
+  `LastStatus` includes the embedded PoE2 baseline and last-checked patch, and
+  the loader rejects an explicitly non-PoE2 data file.
 - `ExportDiagnosticReport`: writes a timestamped report to `WellWise/diagnostics/` with area info, visible Well roots, option text, UI paths, item context, and tier-match details.
 - `LastStatus`, `LastContext`, `LastOptions`: read-only status fields for quick troubleshooting.
 
@@ -85,7 +87,9 @@ level, prefix/suffix side, typed mod keys, and normalized text from the bundled
 PoE2 tier data. A throttled UI scan finds the Well window and current item;
 `Render` draws tier/range badges and diagnostic status. Partial reads retry with
 backoff, and unknown context intentionally shows `Tier unknown` rather than
-guessing. No valuation, network, or input automation is used.
+guessing. No valuation, network, or input automation is used. The bundled data
+was generated from the local PoE2 dump on 2026-06-22, validated against 0.5.4,
+and last checked against 0.5.4e; regenerate it after a Well/modifier change.
 
 Build: **PASS**, classification **CURRENT_WITH_WARNINGS**; resolver tests pass,
 but a live Well UI capture is still required. See the [central PoE2 report](../../README.md)

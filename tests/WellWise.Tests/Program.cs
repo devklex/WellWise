@@ -54,6 +54,8 @@ static WellOfSoulsTierResolver CreateResolver()
     var resolver = new WellOfSoulsTierResolver();
     resolver.Load(root);
     AssertContains(resolver.LoadStatus, "loaded", "resolver data should load");
+    AssertContains(resolver.LoadStatus, "PoE2", "resolver data provenance");
+    AssertContains(resolver.LoadStatus, "0.5.4e", "resolver checked patch");
     return resolver;
 }
 

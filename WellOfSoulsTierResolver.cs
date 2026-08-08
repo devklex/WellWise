@@ -38,7 +38,22 @@ public sealed class WellOfSoulsTierResolver
 
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             _database = JsonSerializer.Deserialize<WellTierDatabase>(File.ReadAllText(path), options) ?? new WellTierDatabase();
-            _loadStatus = $"loaded {_database.Rules.Count} Well tier rules";
+            if (!string.IsNullOrWhiteSpace(_database.Game) &&
+                !string.Equals(_database.Game, "poe2", StringComparison.OrdinalIgnoreCase))
+            {
+                string rejectedGame = _database.Game;
+                _database = new WellTierDatabase();
+                _loadStatus = $"load rejected: data game '{rejectedGame}' is not poe2";
+                return;
+            }
+
+            string baseline = string.IsNullOrWhiteSpace(_database.ValidatedAgainstPatch)
+                ? "patch unknown"
+                : $"PoE2 {_database.ValidatedAgainstPatch}";
+            string checkedPatch = string.IsNullOrWhiteSpace(_database.LastCheckedPatch)
+                ? ""
+                : $"; checked {_database.LastCheckedPatch}";
+            _loadStatus = $"loaded {_database.Rules.Count} Well tier rules ({baseline}{checkedPatch})";
         }
         catch (Exception ex)
         {
@@ -694,8 +709,12 @@ public sealed record WellOfSoulsTierResult(
 public sealed class WellTierDatabase
 {
     public int Schema { get; set; }
+    public string Game { get; set; } = string.Empty;
     public string GeneratedAt { get; set; } = string.Empty;
+    public string ValidatedAgainstPatch { get; set; } = string.Empty;
+    public string LastCheckedPatch { get; set; } = string.Empty;
     public string Source { get; set; } = string.Empty;
+    public List<string> SourceUrls { get; set; } = [];
     public List<string> Notes { get; set; } = [];
     public List<WellTierRule> Rules { get; set; } = [];
 }
