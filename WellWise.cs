@@ -64,6 +64,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
     private int _diagnosticScanSequence;
     private string? _staleChoiceUiNotice;
     private DateTime _staleChoiceUiNoticeUntil = DateTime.MinValue;
+    private bool _settingsHooksAttached;
 
     private static readonly TimeSpan ScanInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan BroadScanInterval = TimeSpan.FromMilliseconds(4000);
@@ -139,6 +140,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         LoadData();
         Settings.ReloadData.OnPressed += LoadData;
         Settings.ExportDiagnosticReport.OnPressed += ExportDiagnosticReport;
+        _settingsHooksAttached = true;
         return true;
     }
 
@@ -4298,4 +4300,28 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             3 => Color.FromArgb(255, 255, 220, 70),
             _ => Color.FromArgb(255, 176, 190, 197)
         };
+
+    public override void OnPluginDestroyForHotReload()
+    {
+        DetachSettingsHooks();
+        ClearWellState();
+        base.OnPluginDestroyForHotReload();
+    }
+
+    public override void Dispose()
+    {
+        DetachSettingsHooks();
+        ClearWellState();
+        base.Dispose();
+    }
+
+    private void DetachSettingsHooks()
+    {
+        if (!_settingsHooksAttached)
+            return;
+
+        Settings.ReloadData.OnPressed -= LoadData;
+        Settings.ExportDiagnosticReport.OnPressed -= ExportDiagnosticReport;
+        _settingsHooksAttached = false;
+    }
 }
