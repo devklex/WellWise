@@ -24,7 +24,9 @@ var tests = new (string Name, Action Body)[]
     ("otherworldly ring mana before life resolves", OtherworldlyRingDamageTakenFromManaBeforeLife),
     ("otherworldly amulet scaled critical chance uses display range", OtherworldlyAmuletFireSpellCriticalChance),
     ("otherworldly belt no-number stat resolves without fake range", OtherworldlyBeltMeleeSplash),
-    ("otherworldly accessory rules stay class-specific", OtherworldlyAccessoryRulesStayClassSpecific)
+    ("otherworldly accessory rules stay class-specific", OtherworldlyAccessoryRulesStayClassSpecific),
+    ("Well area classifier accepts canonical IDs and names", WellAreaClassifierAcceptsCanonicalIdsAndNames),
+    ("Well area classifier rejects unrelated areas", WellAreaClassifierRejectsUnrelatedAreas)
 };
 
 int failures = 0;
@@ -256,6 +258,19 @@ static void OtherworldlyAccessoryRulesStayClassSpecific()
     AssertFalse(result.Known, "ring-only Otherworldly rule should not resolve for a belt");
 }
 
+static void WellAreaClassifierAcceptsCanonicalIdsAndNames()
+{
+    AssertTrue(WellAreaClassifier.IsWellOfSoulsArea("", "", "Abyss_Hub", ""), "canonical hub id");
+    AssertTrue(WellAreaClassifier.IsWellOfSoulsArea("", "", "", "Abyss_Pinnacle"), "canonical pinnacle raw name");
+    AssertTrue(WellAreaClassifier.IsWellOfSoulsArea("The Well of Souls", "", "", ""), "instance name");
+    AssertTrue(WellAreaClassifier.IsWellOfSoulsArea("", "The Well of Souls", "", ""), "area name");
+}
+
+static void WellAreaClassifierRejectsUnrelatedAreas()
+{
+    AssertFalse(WellAreaClassifier.IsWellOfSoulsArea("The Dreadnought", "The Dreadnought", "Dreadnought", "Dreadnought"), "unrelated area");
+}
+
 static void AssertKnown(WellOfSoulsTierResult result)
 {
     if (!result.Known)
@@ -292,5 +307,11 @@ static void AssertContains(string value, string expectedPart, string label)
 static void AssertFalse(bool condition, string message)
 {
     if (condition)
+        throw new InvalidOperationException(message);
+}
+
+static void AssertTrue(bool condition, string message)
+{
+    if (!condition)
         throw new InvalidOperationException(message);
 }

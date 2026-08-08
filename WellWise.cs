@@ -125,11 +125,6 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         "Threshold",
         "Deflection"
     };
-    private static readonly HashSet<string> WellAreaRawNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Abyss_Hub",
-        "Abyss_Pinnacle"
-    };
     private static readonly string[] WellKnownItemClasses =
     [
         "Body Armour", "Helmet", "Gloves", "Boots", "Shield", "Buckler", "Quiver", "Focus", "Belt", "Ring", "Amulet",
@@ -515,10 +510,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
     private static bool IsWellOfSoulsArea(AreaInfo area)
     {
-        return WellAreaRawNames.Contains(area.AreaId) ||
-               WellAreaRawNames.Contains(area.RawName) ||
-               string.Equals(area.InstanceName, "The Well of Souls", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(area.AreaName, "The Well of Souls", StringComparison.OrdinalIgnoreCase);
+        return WellAreaClassifier.IsWellOfSoulsArea(area.InstanceName, area.AreaName, area.AreaId, area.RawName);
     }
 
     private void DrawStaleChoiceUiNotice(DateTime now)
