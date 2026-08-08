@@ -42,6 +42,8 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
     private static readonly Regex WellRollValueRegex = new(@"(?<prefix>[+-]?)\s*(?<value>\d+(?:\.\d+)?)(?<suffix>%?)", RegexOptions.Compiled);
     private static readonly Regex TypedWellTranslationTokenRegex = new(@"\[(?<first>[^\]|]+)(?:\|(?<second>[^\]]+))?\]", RegexOptions.Compiled);
+    private static readonly object StringPropertyCacheSync = new();
+    private static readonly Dictionary<(Type Type, string Name), PropertyInfo?> StringPropertyCache = [];
 
     private readonly WellOfSoulsTierResolver _resolver = new();
     private readonly Dictionary<string, DateTime> _nextDebugFailureLogAt = new(StringComparer.OrdinalIgnoreCase);
@@ -571,7 +573,21 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
         try
         {
-            var prop = obj.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var type = obj.GetType();
+            var key = (type, propertyName);
+            PropertyInfo? prop;
+            lock (StringPropertyCacheSync)
+            {
+                if (!StringPropertyCache.TryGetValue(key, out prop))
+                {
+                    prop = type.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (prop?.GetIndexParameters().Length != 0 || prop?.CanRead != true)
+                        prop = null;
+
+                    StringPropertyCache[key] = prop;
+                }
+            }
+
             if (prop == null || prop.GetIndexParameters().Length != 0)
                 return string.Empty;
 
