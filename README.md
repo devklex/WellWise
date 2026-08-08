@@ -77,3 +77,16 @@ Then reload/compile source plugins in ExileCore2.
 - `Tier unknown` is safer than a fake tier. It usually means missing item context, unsupported option text, or a data coverage gap.
 - If ExileCore2 hot reload shows old `Tier unknown` labels after an update, restart ExileCore2 so the plugin assembly and copied data reload cleanly.
 - The data file may need regeneration after large PoE2 balance patches.
+
+## Operation logic and status
+
+`WellOfSoulsTierResolver` matches each visible option against item class, item
+level, prefix/suffix side, typed mod keys, and normalized text from the bundled
+PoE2 tier data. A throttled UI scan finds the Well window and current item;
+`Render` draws tier/range badges and diagnostic status. Partial reads retry with
+backoff, and unknown context intentionally shows `Tier unknown` rather than
+guessing. No valuation, network, or input automation is used.
+
+Build: **PASS**, classification **CURRENT_WITH_WARNINGS**; resolver tests pass,
+but a live Well UI capture is still required. See the [central PoE2 report](../../README.md)
+and [audit](../../../docs/plugins/WellWise/AUDIT.md).
