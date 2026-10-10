@@ -795,6 +795,46 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         }
     }
 
+    // The typed window is open but offers no choices (before a reveal, or while the item returns from the well): that
+    // is the reveal prompt, so the UI search is skipped. RevealOptions is empty exactly while no choices are shown.
+    // A missing or closed typed window, a visible Confirm button, or a partial set of rows still falls back to the search.
+    private bool TryReadTypedWaitingState(out WellState state, out Element? typedWindow)
+    {
+        state = new WellState([], null);
+        typedWindow = null;
+        try
+        {
+            if (!TryGetVisibleTypedWellWindow(out var window, out _))
+                return false;
+            if (TryReadObjectProperty(window, "RevealOptions") is not IEnumerable revealOptions)
+                return false;
+            foreach (var _ in revealOptions)
+                return false;
+
+            // A shown Confirm button means choices are up, so an empty row list there is a bad read, not a prompt.
+            var confirmButton = TryGetElementProperty(window, "ConfirmButton");
+            if (confirmButton == null || confirmButton.Address == 0 || SafeVisible(confirmButton))
+                return false;
+
+            typedWindow = window;
+            state = new WellState(
+                [],
+                BuildWellItemContext(window) ?? BuildTypedItemContext(window),
+                AwaitingRevealPrompt: true,
+                WindowVisible: true,
+                RevealButtonVisible: false,
+                ConfirmButtonVisible: false,
+                PromptTextVisible: false);
+            return true;
+        }
+        catch
+        {
+            state = new WellState([], null);
+            typedWindow = null;
+            return false;
+        }
+    }
+
     // The item context from the typed window's Item entity (its base type's class and name, its item level), for
     // windows that show no item description. Null when any of it is missing (fail closed).
     private ItemSnapshot? BuildTypedItemContext(Element typedWindow)
@@ -950,6 +990,25 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         catch
         {
             options = [];
+            return false;
+        }
+    }
+
+    // The typed window resolves but is hidden, and has the Well window's shape (a Confirm button): the Well window is
+    // closed, so the UI search is skipped. A window that does not resolve, or lacks its Confirm button, still falls back.
+    private bool IsTypedWellWindowClosed()
+    {
+        try
+        {
+            var window = TryGetElementProperty(GameController.Game.IngameState.IngameUi, "WellOfSoulsWindow");
+            if (window == null || window.Address == 0 || SafeVisible(window))
+                return false;
+
+            var confirmButton = TryGetElementProperty(window, "ConfirmButton");
+            return confirmButton != null && confirmButton.Address != 0;
+        }
+        catch
+        {
             return false;
         }
     }
@@ -2058,6 +2117,17 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
                 return typedState;
             }
+
+            if (TryReadTypedWaitingState(out var waitingState, out var waitingWindow))
+            {
+                if (updateCache && waitingWindow != null)
+                    _cachedWellRoot = waitingWindow;
+
+                return waitingState;
+            }
+
+            if (IsTypedWellWindowClosed())
+                return new WellState([], null);
 
             var candidates = new List<WellRootCandidate>();
             var seenRoots = new HashSet<long>();
