@@ -282,6 +282,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             }
 
             _drawInfos = BuildDrawInfos(_options, _itemContext);
+            LogBadgesIfChanged(_drawInfos, _itemContext);
             Settings.LastStatus.Value = _resolver.LoadStatus;
             Settings.LastContext.Value = FormatContext(_itemContext);
             Settings.LastOptions.Value = promptRevealState
@@ -756,12 +757,22 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             if (!TryGetVisibleTypedWellWindow(out typedWindow, out var windowRect))
                 return false;
 
-            var context = BuildWellItemContext(typedWindow);
+            // The keyboard UI shows the item description only on hover, so the window may hold no item text; then the
+            // class and level come from the window's typed Item.
+            var textContext = BuildWellItemContext(typedWindow);
+            var context = textContext ?? BuildTypedItemContext(typedWindow);
             if (context == null)
                 return false;
 
+            // A text context that differs from the remembered item may be stale or partial text, so it is refused; a
+            // context from the typed Item is the item in the slot, so a different one means a new item (without item
+            // text, a ring placed after a jewel otherwise kept the jewel's context).
             if (_itemContext != null && !SameWellItemContext(context, _itemContext))
-                return false;
+            {
+                if (textContext != null)
+                    return false;
+                _itemContext = context;
+            }
 
             if (!TryBuildTypedWellOptions(typedWindow, windowRect, out var options))
                 return false;
@@ -781,6 +792,34 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
             state = new WellState([], null);
             typedWindow = null;
             return false;
+        }
+    }
+
+    // The item context from the typed window's Item entity (its base type's class and name, its item level), for
+    // windows that show no item description. Null when any of it is missing (fail closed).
+    private ItemSnapshot? BuildTypedItemContext(Element typedWindow)
+    {
+        try
+        {
+            if (TryReadObjectProperty(typedWindow, "Item") is not Entity item || item.Address == 0)
+                return null;
+            var baseType = GameController.Files.BaseItemTypes.Translate(item.Path);
+            if (baseType == null || string.IsNullOrWhiteSpace(baseType.ClassName))
+                return null;
+            int itemLevel = item.GetComponent<ExileCore2.PoEMemory.Components.Mods>()?.ItemLevel ?? 0;
+            if (itemLevel <= 0 || itemLevel > 100)
+                return null;
+            return new ItemSnapshot
+            {
+                Source = "typed Item",
+                BaseName = baseType.BaseName ?? string.Empty,
+                ClassName = baseType.ClassName,
+                ItemLevel = itemLevel,
+            };
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -821,6 +860,7 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         _options = typedOptions;
         _itemContext = currentItemContext;
         _drawInfos = BuildDrawInfos(_options, _itemContext);
+        LogBadgesIfChanged(_drawInfos, _itemContext);
         _consecutivePartialReads = 0;
         _consecutiveIncompleteChoiceReads = 0;
         _consecutiveSoftRebinds = 0;
@@ -1716,6 +1756,26 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
         return score;
     }
 
+    private string? _lastLoggedBadges;
+
+    // With DebugMode on: one log line per badge whenever the shown badges change (item, choice text, and the tier,
+    // range and rule shown), so a reveal can be checked afterwards without a screenshot.
+    private void LogBadgesIfChanged(IReadOnlyList<WellDrawInfo> drawInfos, ItemSnapshot? item)
+    {
+        if (!Settings.DebugMode.Value || drawInfos.Count == 0)
+            return;
+        var lines = drawInfos.Select(info =>
+            $"[WellWise] {(item == null ? "no item" : $"{item.DisplayName} ({item.ClassName}, ilvl {item.ItemLevel})")}: " +
+            $"\"{info.Option.Text}\" -> {(info.TierResult.Known ? $"{info.TierResult.AffixType} {info.TierResult.Summary} [{info.TierResult.RuleId}]" : $"unknown ({info.TierResult.Detail})")}")
+            .ToList();
+        var signature = string.Join("\n", lines);
+        if (signature == _lastLoggedBadges)
+            return;
+        _lastLoggedBadges = signature;
+        foreach (var line in lines)
+            DebugWindow.LogMsg(line);
+    }
+
     private List<WellDrawInfo> BuildDrawInfos(IReadOnlyList<WellOption> options, ItemSnapshot? item)
     {
         if (options.Count == 0)
@@ -1729,12 +1789,17 @@ public sealed class WellWise : BaseSettingsPlugin<WellWiseSettings>
 
     private WellOfSoulsTierResult ResolveOptionTier(WellOption option, ItemSnapshot? item)
     {
-        var textResult = _resolver.Resolve(item, option.Text);
-        if (textResult.Known || string.IsNullOrWhiteSpace(option.ModKey))
-            return textResult;
+        // The game's own mod key names the rule exactly; text alone can match a look-alike (a Heart of the Well
+        // "6% increased Stun Threshold" also matches the plain jewel ladder, 6-16% instead of 5-10%). Text matching
+        // stays the fallback for choices without a key rule.
+        if (!string.IsNullOrWhiteSpace(option.ModKey))
+        {
+            var modKeyResult = _resolver.ResolveByModKey(item, option.ModKey, option.Text);
+            if (modKeyResult.Known)
+                return modKeyResult;
+        }
 
-        var modKeyResult = _resolver.ResolveByModKey(item, option.ModKey, option.Text);
-        return modKeyResult.Known ? modKeyResult : textResult;
+        return _resolver.Resolve(item, option.Text);
     }
 
     private static bool IsSafeOptionForDrawing(WellOption option)

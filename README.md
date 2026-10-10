@@ -59,7 +59,7 @@ Then reload/compile source plugins in ExileCore2.
 - `Enable`: turns the plugin on/off.
 - `ShowOptionText`: optionally includes the Well option text inside the small overlay badge for debugging. Off by default because the game already shows the option text.
 - `ShowAreaDebugOverlay`: draws a small area-detection label showing whether WellWise thinks you are in The Well of Souls.
-- `DebugMode`: logs throttled scan errors to ExileCore2 logs.
+- `DebugMode`: logs throttled scan errors to ExileCore2 logs, and one line per badge whenever the shown badges change (item, choice text, tier, range and rule).
 - `ReloadData`: reloads `data/well_of_souls_tiers.json` without restarting ExileCore2.
 - `ExportDiagnosticReport`: writes a timestamped report to `WellWise/diagnostics/` with area info, visible Well roots, option text, UI paths, item context, and tier-match details.
 - `LastStatus`, `LastContext`, `LastOptions`: read-only status fields for quick troubleshooting.

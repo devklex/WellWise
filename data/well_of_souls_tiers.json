@@ -15,7 +15,7 @@
                   "Raw selfpoe_data is not used as a full replacement source because broad validation can reveal display-normalization mismatches."
               ],
     "validation":  {
-                       "totalRules":  1395,
+                       "totalRules":  1400,
                        "unresolvedApplicability":  0,
                        "duplicateSemanticFamilies":  10,
                        "dominatedSupersetRulesExcluded":  0,
@@ -131925,6 +131925,223 @@
                                                        {
                                                            "min":  28,
                                                            "max":  56,
+                                                           "prefix":  "",
+                                                           "suffix":  "%"
+                                                       }
+                                                   ]
+                                    }
+                                ]
+                  },
+                  {
+                      "id":  "repoe_desecrated_UniqueKulemakChaosDamageAndExplosion_1",
+                      "label":  "(100-160)% increased Chaos Damage; Enemies you kill have a (5-10)% chance to explode, dealing a quarter of their maximum Life as Chaos damage",
+                      "itemClassContains":  [
+                                                "Staff"
+                                            ],
+                      "applicabilityStatus":  "resolved",
+                      "applicabilitySource":  "selfpoe_validated_kulemak_abyss_special_prefix",
+                      "textContainsAll":  [
+                                              "Chaos",
+                                              "Damage",
+                                              "Enemies",
+                                              "kill",
+                                              "chance",
+                                              "explode",
+                                              "dealing",
+                                              "quarter",
+                                              "their",
+                                              "maximum",
+                                              "Life"
+                                          ],
+                      "generation":  "prefix",
+                      "prefix":  "",
+                      "suffix":  "%",
+                      "desecratedOnly":  true,
+                      "tiers":  [
+                                    {
+                                        "tier":  1,
+                                        "itemLevel":  1,
+                                        "min":  100,
+                                        "max":  160,
+                                        "values":  [
+                                                       {
+                                                           "min":  100,
+                                                           "max":  160,
+                                                           "prefix":  "",
+                                                           "suffix":  "%"
+                                                       },
+                                                       {
+                                                           "min":  5,
+                                                           "max":  10,
+                                                           "prefix":  "",
+                                                           "suffix":  "%"
+                                                       }
+                                                   ]
+                                    }
+                                ]
+                  },
+                  {
+                      "id":  "repoe_desecrated_UniqueKulemakChaosDamageCurseLowersChaosRes_1",
+                      "label":  "(100-160)% increased Chaos Damage; Enemies you Curse have -(5-8)% to Chaos Resistance",
+                      "itemClassContains":  [
+                                                "Staff"
+                                            ],
+                      "applicabilityStatus":  "resolved",
+                      "applicabilitySource":  "selfpoe_validated_kulemak_abyss_special_prefix",
+                      "textContainsAll":  [
+                                              "Chaos",
+                                              "Damage",
+                                              "Enemies",
+                                              "Curse",
+                                              "Resistance"
+                                          ],
+                      "generation":  "prefix",
+                      "prefix":  "",
+                      "suffix":  "%",
+                      "desecratedOnly":  true,
+                      "tiers":  [
+                                    {
+                                        "tier":  1,
+                                        "itemLevel":  1,
+                                        "min":  100,
+                                        "max":  160,
+                                        "values":  [
+                                                       {
+                                                           "min":  100,
+                                                           "max":  160,
+                                                           "prefix":  "",
+                                                           "suffix":  "%"
+                                                       },
+                                                       {
+                                                           "min":  5,
+                                                           "max":  8,
+                                                           "prefix":  "-",
+                                                           "suffix":  "%"
+                                                       }
+                                                   ]
+                                    }
+                                ]
+                  },
+                  {
+                      "id":  "repoe_desecrated_UniqueKulemakElementalDamageEleAilmentDuration_1",
+                      "label":  "(100-160)% increased Elemental Damage; (10-20)% increased Duration of Elemental Ailments on Enemies",
+                      "itemClassContains":  [
+                                                "Staff"
+                                            ],
+                      "applicabilityStatus":  "resolved",
+                      "applicabilitySource":  "selfpoe_validated_kulemak_abyss_special_prefix",
+                      "textContainsAll":  [
+                                              "Elemental",
+                                              "Damage",
+                                              "Duration",
+                                              "Ailments",
+                                              "Enemies"
+                                          ],
+                      "generation":  "prefix",
+                      "prefix":  "",
+                      "suffix":  "%",
+                      "desecratedOnly":  true,
+                      "tiers":  [
+                                    {
+                                        "tier":  1,
+                                        "itemLevel":  1,
+                                        "min":  100,
+                                        "max":  160,
+                                        "values":  [
+                                                       {
+                                                           "min":  100,
+                                                           "max":  160,
+                                                           "prefix":  "",
+                                                           "suffix":  "%"
+                                                       },
+                                                       {
+                                                           "min":  10,
+                                                           "max":  20,
+                                                           "prefix":  "",
+                                                           "suffix":  "%"
+                                                       }
+                                                   ]
+                                    }
+                                ]
+                  },
+                  {
+                      "id":  "repoe_desecrated_UniqueKulemakSpellPhysicalDamageBleedChance_1",
+                      "label":  "(100-160)% increased Spell Physical Damage; (20-30)% chance to inflict Bleeding on Hit",
+                      "itemClassContains":  [
+                                                "Staff"
+                                            ],
+                      "applicabilityStatus":  "resolved",
+                      "applicabilitySource":  "selfpoe_validated_kulemak_abyss_special_prefix",
+                      "textContainsAll":  [
+                                              "Spell",
+                                              "Physical",
+                                              "Damage",
+                                              "chance",
+                                              "inflict",
+                                              "Bleeding",
+                                              "Hit"
+                                          ],
+                      "generation":  "prefix",
+                      "prefix":  "",
+                      "suffix":  "%",
+                      "desecratedOnly":  true,
+                      "tiers":  [
+                                    {
+                                        "tier":  1,
+                                        "itemLevel":  1,
+                                        "min":  100,
+                                        "max":  160,
+                                        "values":  [
+                                                       {
+                                                           "min":  100,
+                                                           "max":  160,
+                                                           "prefix":  "",
+                                                           "suffix":  "%"
+                                                       },
+                                                       {
+                                                           "min":  20,
+                                                           "max":  30,
+                                                           "prefix":  "",
+                                                           "suffix":  "%"
+                                                       }
+                                                   ]
+                                    }
+                                ]
+                  },
+                  {
+                      "id":  "repoe_desecrated_UniqueKulemakSpiritAndSpiritReservationEfficiency_1",
+                      "label":  "+(40-60) to Spirit; (6-10)% increased Spirit Reservation Efficiency of Skills",
+                      "itemClassContains":  [
+                                                "Staff"
+                                            ],
+                      "applicabilityStatus":  "resolved",
+                      "applicabilitySource":  "selfpoe_validated_kulemak_abyss_special_prefix",
+                      "textContainsAll":  [
+                                              "Spirit",
+                                              "Reservation",
+                                              "Efficiency",
+                                              "Skills"
+                                          ],
+                      "generation":  "prefix",
+                      "prefix":  "+",
+                      "suffix":  "",
+                      "desecratedOnly":  true,
+                      "tiers":  [
+                                    {
+                                        "tier":  1,
+                                        "itemLevel":  1,
+                                        "min":  40,
+                                        "max":  60,
+                                        "values":  [
+                                                       {
+                                                           "min":  40,
+                                                           "max":  60,
+                                                           "prefix":  "+",
+                                                           "suffix":  ""
+                                                       },
+                                                       {
+                                                           "min":  6,
+                                                           "max":  10,
                                                            "prefix":  "",
                                                            "suffix":  "%"
                                                        }

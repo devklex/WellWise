@@ -485,6 +485,9 @@ public sealed class WellOfSoulsTierResolver
     {
         string prefix = EffectivePrefix(range, rule, useRuleDecorationFallback);
         string suffix = EffectiveSuffix(range, rule, useRuleDecorationFallback);
+        // A negative range reads "-(5-8)%" as in the game, not "-5-8%"; a single value stays "-7%".
+        if (prefix == "-" && range.Min != range.Max)
+            return $"-({FormatNumber(range.Min)}-{FormatNumber(range.Max)}){suffix}";
         return $"{prefix}{FormatNumber(range.Min)}-{FormatNumber(range.Max)}{suffix}";
     }
 

@@ -19,6 +19,10 @@ var tests = new (string Name, Action Body)[]
     ("staff Puppet Master mod key resolves", StaffPuppetMasterModKeyResolves),
     ("staff Puppet Master mod key stays class-specific", StaffPuppetMasterModKeyStaysClassSpecific),
     ("staff Kulemak Unholy Might resolves", StaffKulemakUnholyMightResolves),
+    ("staff Kulemak spell physical and bleed resolves", StaffKulemakSpellPhysicalBleedResolves),
+    ("staff Kulemak spirit and reservation efficiency resolves", StaffKulemakSpiritAndEfficiencyResolves),
+    ("staff Kulemak chaos damage and curse resolves", StaffKulemakCurseChaosResolves),
+    ("staff Kulemak rules stay class-specific", StaffKulemakRulesStayClassSpecific),
     ("typed mod key requires item context", TypedModKeyRequiresItemContext),
     ("unknown typed mod key stays unknown", UnknownTypedModKeyStaysUnknown),
     ("otherworldly ring mana before life resolves", OtherworldlyRingDamageTakenFromManaBeforeLife),
@@ -205,6 +209,46 @@ static void StaffKulemakUnholyMightResolves()
     AssertEqual(28d, result.CurrentTier?.Min, "staff Kulemak Unholy Might minimum");
     AssertEqual(56d, result.CurrentTier?.Max, "staff Kulemak Unholy Might maximum");
     AssertContains(result.Summary, "28-56%", "staff Kulemak Unholy Might display range");
+}
+
+// Unborn Lich reveals (2026-10-09): without their own rules these matched the plain Staff spell ladder (T5) and a 35-50 Spirit rule.
+static void StaffKulemakSpellPhysicalBleedResolves()
+{
+    var result = CreateResolver().Resolve(Item("Staff", 86), "114% increased Spell Physical Damage 22% chance to inflict Bleeding on Hit");
+    AssertKnown(result);
+    AssertEqual("repoe_desecrated_UniqueKulemakSpellPhysicalDamageBleedChance_1", result.RuleId, "staff Kulemak spell physical rule id");
+    AssertEqualIgnoreCase("prefix", result.AffixType, "staff Kulemak spell physical affix type");
+    AssertEqual(1, result.CurrentTier?.Tier, "staff Kulemak spell physical tier");
+    AssertEqual(100d, result.CurrentTier?.Min, "staff Kulemak spell physical minimum");
+    AssertEqual(160d, result.CurrentTier?.Max, "staff Kulemak spell physical maximum");
+    AssertContains(result.Summary, "100-160%", "staff Kulemak spell physical display range");
+}
+
+static void StaffKulemakSpiritAndEfficiencyResolves()
+{
+    var result = CreateResolver().Resolve(Item("Staff", 86), "+51 to Spirit 6% increased Spirit Reservation Efficiency of Skills");
+    AssertKnown(result);
+    AssertEqual("repoe_desecrated_UniqueKulemakSpiritAndSpiritReservationEfficiency_1", result.RuleId, "staff Kulemak spirit rule id");
+    AssertEqual(1, result.CurrentTier?.Tier, "staff Kulemak spirit tier");
+    AssertEqual(40d, result.CurrentTier?.Min, "staff Kulemak spirit minimum");
+    AssertEqual(60d, result.CurrentTier?.Max, "staff Kulemak spirit maximum");
+    AssertContains(result.Summary, "+40-60", "staff Kulemak spirit display range");
+}
+
+static void StaffKulemakCurseChaosResolves()
+{
+    var result = CreateResolver().Resolve(Item("Staff", 86), "120% increased Chaos Damage Enemies you Curse have -6% to Chaos Resistance");
+    AssertKnown(result);
+    AssertEqual("repoe_desecrated_UniqueKulemakChaosDamageCurseLowersChaosRes_1", result.RuleId, "staff Kulemak curse chaos rule id");
+    AssertEqual(1, result.CurrentTier?.Tier, "staff Kulemak curse chaos tier");
+    AssertContains(result.Summary, "-(5-8)%", "staff Kulemak curse chaos negative range display");
+}
+
+static void StaffKulemakRulesStayClassSpecific()
+{
+    var result = CreateResolver().Resolve(Item("Wand", 86), "114% increased Spell Physical Damage 22% chance to inflict Bleeding on Hit");
+    if (result.RuleId.Contains("UniqueKulemak", StringComparison.Ordinal))
+        throw new Exception($"wand matched a Staff-only Kulemak rule: {result.RuleId}");
 }
 
 static void TypedModKeyRequiresItemContext()
